@@ -13,7 +13,7 @@ Needs Windows 10 or 11 and Claude Code. The `claude` command must be on PATH for
 
 `install` does three things:
 - copies the exe to `%LOCALAPPDATA%\Programs\Claudesona\`
-- adds three hooks (`SessionStart`, `Notification` and `PermissionRequest`) to `~/.claude/settings.json`, after saving a backup as `settings.json.claudesona-backup`
+- adds five hooks (`SessionStart`, `SessionEnd`, `Notification`, `PermissionRequest` and `PreToolUse` for Bash/PowerShell) to `~/.claude/settings.json`, after saving a backup as `settings.json.claudesona-backup`
 - starts her
 
 From then on she starts with every new Claude Code session. Sessions that were already open need a restart.

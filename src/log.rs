@@ -15,6 +15,8 @@ pub enum Event {
     TurnEnd,                                  // the turn is over
     AgentStart { id: String, label: String }, // a sub-agent was spawned
     AgentDone(String),                        // a tool call finished (minis match it by id)
+    ShellStart(String),                       // a command went to the background (task id)
+    ShellDone(String),                        // a background command ended (task id)
 }
 
 pub fn parse_line(line: &str) -> Vec<Event> {
@@ -35,6 +37,14 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                 .collect();
             if typed || has_text {
                 events.insert(0, Event::Prompt);
+            }
+            // Run in the background, or moved there after the 2-minute timeout.
+            if let Some(id) = d["toolUseResult"]["backgroundTaskId"].as_str() {
+                events.push(Event::ShellStart(id.to_string()));
+            }
+            // Its end comes back as "<task-notification>\n<task-id>ID</task-id>…".
+            if let Some(id) = content.as_str().and_then(|s| s.strip_prefix("<task-notification>")?.split("<task-id>").nth(1)?.split('<').next()) {
+                events.push(Event::ShellDone(id.to_string()));
             }
             events
         }
@@ -74,16 +84,47 @@ pub fn parse_line(line: &str) -> Vec<Event> {
     }
 }
 
-fn tool_label(name: &str, input: &Value) -> String {
+pub fn tool_label(name: &str, input: &Value) -> String {
     let file = input["file_path"].as_str().map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string());
     match (name, file) {
         ("Read", Some(f)) => format!("Reading {f}…"),
         ("Edit" | "Write", Some(f)) => format!("Editing {f}…"),
-        ("Bash" | "PowerShell", _) => "Running a command…".into(),
+        ("Bash" | "PowerShell", _) => command_line(input["command"].as_str().unwrap_or("")).into(),
         ("Grep" | "Glob", _) => "Searching…".into(),
         ("Agent" | "Task", _) => "Sending a helper…".into(),
         ("WebSearch" | "WebFetch", _) => "Looking it up online…".into(),
         _ => format!("Using {name}…"),
+    }
+}
+
+/// Her line for a shell command. Same command, same line; different commands vary.
+fn command_line(cmd: &str) -> &'static str {
+    let lines = command_lines(cmd);
+    lines[cmd.bytes().map(usize::from).sum::<usize>() % lines.len()]
+}
+
+/// Her lines for a kind of shell command. First matching category wins.
+fn command_lines(cmd: &str) -> &'static [&'static str] {
+    let c = format!(" {} ", cmd.to_lowercase().replace(['\n', ';', '|', '&', '(', ')'], " "));
+    let has = |keys: &[&str]| keys.iter().any(|k| c.contains(k));
+    if has(&["test", "pytest", "jest", "vitest"]) {
+        &["Running the tests… fingers crossed~!", "Test time! Please pass, please pass…", "Making sure nothing broke~"]
+    } else if has(&[" git ", " gh "]) {
+        &["Poking at git~", "Checking the history books!", "Git stuff? Leave it to me~"]
+    } else if has(&["install", " cargo add ", " pip ", " winget ", " npm i ", " choco "]) {
+        &["Shopping for packages~!", "Grabbing some goodies…", "Installing stuff, wait for me~"]
+    } else if has(&["build", " cargo check ", " tsc ", " make ", "compile", " clippy "]) {
+        &["Building it up, piece by piece~", "Compiling… the boring part!", "Hammering it all together~"]
+    } else if has(&[" cargo run ", " npm run ", " npm start ", " python ", " node ", " npx ", ".exe "]) {
+        &["Taking it for a spin~!", "Let's see if it runs!", "Starting it up… go go~!"]
+    } else if has(&[" curl ", " wget ", "invoke-webrequest", "invoke-restmethod"]) {
+        &["Knock knock, internet~!", "Fetching something from the web!"]
+    } else if has(&[" rm ", " del ", " rmdir ", "remove-item"]) {
+        &["Tidying up some files…", "Throwing stuff out~ careful, careful!"]
+    } else if has(&[" ls ", " dir ", " cat ", " grep ", " rg ", " find ", " head ", " tail ", " wc ", " sed ", "get-childitem", "get-content", "select-string"]) {
+        &["Peeking around the files~", "Snooping through folders!", "Just taking a little look~"]
+    } else {
+        &["Running a command…", "Typing magic words in the terminal~", "Command, go~!"]
     }
 }
 
@@ -181,6 +222,23 @@ mod tests {
         assert_eq!(parse_line(agent_result), vec![Event::AgentDone("a1".into())]);
         assert_eq!(parse_line(turn_end), vec![Event::TurnEnd]);
         assert!(parse_line(thinking).is_empty() && parse_line("not json").is_empty());
+        let bg = r#"{"type":"user","message":{"content":[{"tool_use_id":"t2","type":"tool_result","content":"Command running in background with ID: bdizax5j0."}]},"toolUseResult":{"stderr":"","backgroundTaskId":"bdizax5j0"}}"#;
+        let bg_done = r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>bdizax5j0</task-id>\n<tool-use-id>t2</tool-use-id>\n<status>completed</status>\n</task-notification>"}}"#;
+        let plugin_note = r#"{"type":"user","message":{"content":"<task-notification>\nponytail: its hook was skipped.\n</task-notification>"}}"#;
+        assert_eq!(parse_line(bg), vec![Event::AgentDone("t2".into()), Event::ShellStart("bdizax5j0".into())]);
+        assert_eq!(parse_line(bg_done), vec![Event::ShellDone("bdizax5j0".into())]);
+        assert!(parse_line(plugin_note).is_empty());
+    }
+
+    #[test]
+    fn commands_get_lines_by_kind() {
+        let is = |cmd: &str, word: &str| assert!(command_lines(cmd)[0].to_lowercase().contains(word), "{cmd} -> {}", command_lines(cmd)[0]);
+        is("cargo test parse", "test");
+        is("cd /c/x && git status", "git");
+        is("npm install", "packages");
+        is("cargo build --release", "build");
+        is("ls -la", "files");
+        is("echo hi", "command");
     }
 
     #[test]

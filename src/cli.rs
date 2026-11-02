@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 pub const ADDR: &str = "127.0.0.1:47827";
-const EVENTS: [&str; 3] = ["SessionStart", "Notification", "PermissionRequest"];
+const EVENTS: [&str; 5] = ["SessionStart", "SessionEnd", "Notification", "PermissionRequest", "PreToolUse"];
 
 pub fn send(msg: &str) -> std::io::Result<()> {
     let mut s = TcpStream::connect_timeout(&ADDR.parse().unwrap(), Duration::from_millis(300))?;
@@ -69,7 +69,12 @@ pub fn set_hooks(settings: &mut Value, cmd: Option<&str>) {
         if let Some(cmd) = cmd {
             let list = map.entry(event).or_insert_with(|| json!([]));
             if let Some(list) = list.as_array_mut() {
-                list.push(json!({ "hooks": [{ "type": "command", "command": cmd }] }));
+                let mut entry = json!({ "hooks": [{ "type": "command", "command": cmd }] });
+                // Shell commands only: the log gets their line after they finish, so this is her only early signal.
+                if event == "PreToolUse" {
+                    entry["matcher"] = json!("Bash|PowerShell");
+                }
+                list.push(entry);
             }
         }
         if map.get(event).and_then(Value::as_array).is_some_and(|l| l.is_empty()) {
@@ -149,6 +154,7 @@ mod tests {
         assert_eq!(s["hooks"]["Notification"].as_array().unwrap().len(), 2);
         assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
         assert_eq!(s["hooks"]["PermissionRequest"].as_array().unwrap().len(), 1);
+        assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "Bash|PowerShell");
         set_hooks(&mut s, None);
         assert_eq!(s, json!({ "theme": "dark", "hooks": { "Notification": [{ "hooks": [other] }] } }));
         let mut empty = json!({});

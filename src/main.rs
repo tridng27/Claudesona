@@ -28,6 +28,14 @@ const CREAM: Color32 = Color32::from_rgb(0xFB, 0xF4, 0xEA);
 const CORAL: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
 const INK: Color32 = Color32::from_rgb(0x4A, 0x2C, 0x22);
 const SIZES: [(&str, f32); 3] = [("S", 0.75), ("M", 1.0), ("L", 1.35)]; // egui zoom; eframe saves it with egui's memory
+const IDLE_NUDGE: f32 = 25.0; // quiet seconds before she sparkles and offers help (after any bubble is gone)
+const IDLE_LINES: [&str; 5] = [
+    "Your sidekick is ready~ Want to work on something?",
+    "Hey hey~ got anything for your sidekick to do?",
+    "So quiet… shall we build something fun? (^o^)",
+    "Your sidekick is getting bored~ any tasks for me?",
+    "Bugs to squash? Features to make? Just say the word~!",
+];
 const POKE_LINES: [&str; 4] = ["Hey~ I'm busy!", "Mou~ don't poke me!", "Hmph! What is it?", "That tickles... stop it!"];
 
 enum Msg {
@@ -171,6 +179,9 @@ struct App {
     placed: bool, // checked that she's on screen after eframe restored her position
     terminal: isize, // foreground window when you last sent a prompt; double-click brings it back
     hidden_until: f32,
+    shells: Vec<String>, // background commands still running in the followed session (task ids)
+    nudge_at: f32,       // when she next offers help, if she stays idle and quiet
+    sparkle_at: f32,     // when her last idle sparkle started
 }
 
 impl App {
@@ -236,6 +247,9 @@ impl App {
             placed: false,
             terminal: 0,
             hidden_until: 0.0,
+            shells: vec![],
+            nudge_at: IDLE_NUDGE,
+            sparkle_at: -99.0,
         }
     }
 
@@ -272,12 +286,17 @@ impl App {
         self.bubble = Some(Bubble { short: text, long: None, expanded: false, hide_at: t + 120.0, is_label: true });
     }
 
+    /// Her pose once Claude's turn is over: still working while a background command runs.
+    fn rest(&self) -> Pose {
+        if self.shells.is_empty() { Pose::Idle } else { Pose::Working }
+    }
+
     fn handle(&mut self, msg: Msg, t: f32) {
         let (path, ev) = match msg {
             Msg::Rewritten { short, long } => {
                 // A rewrite that arrives after the timeout already showed the plain reply: drop it.
                 if self.pending_reply.take().is_some() {
-                    self.pose = Pose::Idle;
+                    self.pose = self.rest();
                     self.say(short, long, t);
                 }
                 return;
@@ -289,6 +308,20 @@ impl App {
                 // PermissionRequest fires the moment the dialog shows. The permission_prompt Notification only
                 // comes after ~6s without typing; it still covers sandbox network prompts, which have no PermissionRequest.
                 let notified = v["notification_type"] == "permission_prompt" || v["message"].as_str().is_some_and(|m| m.contains("permission"));
+                let followed = self.session.as_ref().is_none_or(|p| p.file_stem().is_some_and(|s| v["session_id"] == *s.to_string_lossy()));
+                // A shell command is starting. Its log line only comes after it finishes.
+                if v["hook_event_name"] == "PreToolUse" && followed && !(self.pose == Pose::Waiting && t - self.waiting_since < 2.0) {
+                    self.pose = Pose::Working;
+                    self.label(log::tool_label(v["tool_name"].as_str().unwrap_or(""), &v["tool_input"]), t);
+                }
+                // Claude Code is closing, which stops its background commands.
+                if v["hook_event_name"] == "SessionEnd" && followed {
+                    self.shells.clear();
+                    if self.pending_reply.is_none() && self.pose == Pose::Working {
+                        self.pose = Pose::Idle;
+                        self.bubble = None;
+                    }
+                }
                 if v["hook_event_name"] == "PermissionRequest" || (v["hook_event_name"] == "Notification" && notified) {
                     self.pose = Pose::Waiting;
                     self.waiting_since = t;
@@ -299,6 +332,9 @@ impl App {
             Msg::Log(path, ev) => (path, ev),
         };
         if ev == Event::Prompt {
+            if self.session.as_ref() != Some(&path) {
+                self.shells.clear(); // they belong to the session she stops following
+            }
             self.session = Some(path.clone());
             let fg = win::foreground();
             if fg != 0 && fg != self.hwnd {
@@ -349,9 +385,11 @@ impl App {
                     wake.request_repaint();
                 });
             }
+            Event::ShellStart(id) => self.shells.push(id),
+            Event::ShellDone(id) => self.shells.retain(|s| *s != id),
             Event::TurnEnd => {
                 if self.pending_reply.is_none() {
-                    self.pose = Pose::Idle;
+                    self.pose = self.rest();
                     if self.bubble.as_ref().is_some_and(|b| b.is_label) {
                         self.bubble = None;
                     }
@@ -391,7 +429,7 @@ impl eframe::App for App {
         {
             let plain = log::clean(text, 160);
             self.pending_reply = None;
-            self.pose = Pose::Idle;
+            self.pose = self.rest();
             self.say(plain, None, t);
         }
         if self.bubble.as_ref().is_some_and(|b| t > b.hide_at) {
@@ -414,6 +452,14 @@ impl eframe::App for App {
             self.blink_at = t + 3.0 + 3.0 * self.rand01();
         }
         let blinking = t > self.blink_at;
+        // Idle with nothing on screen for a while: sparkle and offer to help.
+        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() {
+            self.nudge_at = t + IDLE_NUDGE;
+        } else if t > self.nudge_at {
+            let line = IDLE_LINES[(self.rand01() * IDLE_LINES.len() as f32) as usize % IDLE_LINES.len()];
+            self.say(line.into(), None, t - 3.0);
+            self.sparkle_at = t;
+        }
 
         // eframe restores the last position, which can be off screen (monitor unplugged, resolution changed).
         if !self.placed && t > 0.3 {
@@ -492,6 +538,27 @@ impl eframe::App for App {
             let at = pos2(body.right() - 38.0, body.top() + 30.0 - bob);
             painter.text(at, egui::Align2::CENTER_CENTER, "!", FontId::proportional(34.0), CORAL);
         }
+        // Positions are fractions of her canvas: beside her head, clear of her hair.
+        let at = |fx: f32, fy: f32| pos2(body.left() + body.width() * fx, body.top() + body.height() * fy);
+        if pose == Pose::Working {
+            // Two sweat drops, half a cycle apart, each sliding down and fading.
+            for (i, (fx, fy)) in [(0.84, 0.13), (0.15, 0.20)].into_iter().enumerate() {
+                let p = (t / 1.4 + i as f32 * 0.5).fract();
+                sweat_drop(painter, at(fx, fy) + vec2(0.0, p * 14.0), 4.5, (1.0 - p).min(0.3) / 0.3);
+            }
+        }
+        let since = t - self.sparkle_at;
+        if since < 3.0 {
+            // Stars pop in one by one and twinkle, then fade out together.
+            let fade = (3.0 - since).min(0.6) / 0.6;
+            for (i, (fx, fy, r)) in [(0.12, 0.08, 9.0), (0.90, 0.05, 11.0), (0.06, 0.40, 7.0), (0.95, 0.33, 8.0), (0.50, -0.03, 6.0), (0.86, 0.55, 6.0)].into_iter().enumerate() {
+                let local = since - i as f32 * 0.12;
+                if local > 0.0 {
+                    let twinkle = 0.6 + 0.4 * (local * 9.0 + i as f32).sin();
+                    sparkle(painter, at(fx, fy), r * twinkle * (local * 4.0).min(1.0), fade);
+                }
+            }
+        }
 
         // Minis line up beside her feet, alternating left and right.
         let mini_w = HEIGHT * MINI * aspect;
@@ -525,6 +592,32 @@ impl eframe::App for App {
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
+}
+
+/// A four-point star: two long strokes, two short diagonals and a bright center.
+fn sparkle(painter: &Painter, c: Pos2, r: f32, alpha: f32) {
+    let gold = Color32::from_rgb(0xFF, 0xC8, 0x4A).gamma_multiply(alpha);
+    let thick = Stroke::new((r * 0.3).max(1.0), gold);
+    painter.line_segment([c - vec2(r, 0.0), c + vec2(r, 0.0)], thick);
+    painter.line_segment([c - vec2(0.0, r), c + vec2(0.0, r)], thick);
+    let d = r * 0.4;
+    let thin = Stroke::new((r * 0.15).max(1.0), gold);
+    painter.line_segment([c - vec2(d, d), c + vec2(d, d)], thin);
+    painter.line_segment([c - vec2(d, -d), c + vec2(d, -d)], thin);
+    painter.circle_filled(c, r * 0.22, Color32::WHITE.gamma_multiply(alpha));
+}
+
+/// An anime sweat drop: a circle of radius `r` at `c` with a point on top.
+fn sweat_drop(painter: &Painter, c: Pos2, r: f32, alpha: f32) {
+    // The tip is 2r above the center, so its tangents touch the circle at -30° and 210°.
+    let mut pts = vec![c - vec2(0.0, 2.0 * r)];
+    pts.extend((0..=12).map(|i| {
+        let a = (-30.0 + 20.0 * i as f32).to_radians();
+        c + vec2(a.cos(), a.sin()) * r
+    }));
+    let fill = Color32::from_rgb(0xA8, 0xD8, 0xFF).gamma_multiply(alpha);
+    painter.add(egui::Shape::convex_polygon(pts, fill, Stroke::new(1.2, Color32::from_rgb(0x4A, 0x8F, 0xD0).gamma_multiply(alpha))));
+    painter.circle_filled(c + vec2(-r * 0.35, -r * 0.3), r * 0.25, Color32::WHITE.gamma_multiply(alpha));
 }
 
 /// Window size in points; egui zoom turns it into her on-screen size.

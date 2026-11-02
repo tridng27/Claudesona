@@ -32,7 +32,7 @@ target\release\claudesona.exe uninstall   # remove her hooks from ~/.claude/sett
 
 One exe, several modes (`src/main.rs` dispatches on the first argument):
 - **App** (no argument): the egui window. Binding `127.0.0.1:47827` is both its IPC channel and its single-instance lock; a second copy exits quietly.
-- **`hook`** (`src/cli.rs`): run by Claude Code's `SessionStart`, `Notification` and `PermissionRequest` hooks. It forwards the hook JSON to the app over TCP. If the app isn't running and the event is `SessionStart`, it launches the app detached.
+- **`hook`** (`src/cli.rs`): run by Claude Code's `SessionStart`, `SessionEnd`, `Notification`, `PermissionRequest` and `PreToolUse` (Bash|PowerShell) hooks. It forwards the hook JSON to the app over TCP. If the app isn't running and the event is `SessionStart`, it launches the app detached.
 - **`install` / `uninstall`** (`src/cli.rs`): copy the exe and edit `~/.claude/settings.json`. Results show in a message box, because the exe has no console.
 
 Data flow into the UI thread, all on one `mpsc` channel (`Msg`):
@@ -44,7 +44,7 @@ Data flow into the UI thread, all on one `mpsc` channel (`Msg`):
 
 - Everything that knows Claude Code's log format lives in `src/log.rs`. The format is internal and unversioned. Its tests use real line shapes; when a Claude Code update breaks parsing, add the new shape to the tests first.
 - Poll log files; don't use file-change notifications. They don't fire on `\\wsl.localhost` paths, which WSL support will need.
-- The hook must print nothing (SessionStart output is added to Claude's context; PermissionRequest output could answer the dialog). Before spawning the app, it must clear the inherit flag on its std handles, or Claude Code waits forever on the hook's pipe.
+- The hook must print nothing (SessionStart output is added to Claude's context; PermissionRequest and PreToolUse output could answer the dialog). Before spawning the app, it must clear the inherit flag on its std handles, or Claude Code waits forever on the hook's pipe.
 - After a permission prompt, log activity in the next 2s doesn't end Waiting. Claude Code writes its log late, so lines from just before the prompt still arrive.
 - The rewriter must keep the exact flag set in SPEC.md. `--no-session-persistence` keeps her from mirroring her own rewrites; `--restricted` keeps the user's hooks and plugins out. Don't swap in `--bare`: it only accepts API-key auth.
 - Use eframe's glow renderer (`Renderer::Glow`). The default wgpu renderer gives an opaque black window on Windows.
