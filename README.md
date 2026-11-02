@@ -2,6 +2,8 @@
 
 A chibi desktop mascot for Claude Code on Windows. While Claude works she shows what it's doing, retells its replies in her own cheerful voice, and waves you over when Claude needs your permission.
 
+<p align="center"><img src="docs/demo.gif" alt="Claudesona idling, working through tool calls with a helper mini beside her, asking for permission, then going back to idle" width="296"></p>
+
 ## Install on a machine
 
 Needs Windows 10 or 11 and Claude Code. The `claude` command must be on PATH for her in-character rewrites; without it she shows Claude's plain text.
