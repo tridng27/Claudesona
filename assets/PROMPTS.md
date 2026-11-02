@@ -1,6 +1,6 @@
 # Claudesona art prompts
 
-Seven images, made with any AI image tool that accepts a reference image.
+Ten images (plus one optional blink), made with any AI image tool that accepts a reference image.
 
 ## Steps
 
@@ -47,6 +47,20 @@ Tips for this one:
 - The app sways her raised hand to the beat, so the hand and sleeve need empty space around them: no overlap with her hair, face or body. If the tool tucks the hand in close, regenerate.
 - If the tool adds music notes or headphones anyway, regenerate or erase them: the app draws the floating notes itself.
 - Check that her hair outline and sweater still match the master.
+
+### 8. `game_excited.png` (shown the whole time you play "Play with me")
+> [Character] Same character as the reference image. She is super excited to play a guessing game with the viewer: big sparkling wide-open eyes, a huge open-mouthed grin, both fists clenched happily up near her chin, shoulders raised a little with anticipation, leaning slightly toward the viewer, rosy cheeks. Same standing position and body size as the reference, feet together on the same spot. [Style]
+
+### 9. `game_excited_blink.png` (optional, edit of game_excited.png)
+> Edit this image: close her eyes into happy curved lines, like ^ ^, keeping the big grin. Change nothing else.
+
+### 10. `game_smug.png` (she won the game)
+> [Character] Same character as the reference image. She just won a game against the viewer and is playfully smug: half-closed eyes looking at the viewer, one eyebrow slightly raised, a sly closed-mouth smirk, one hand raised with the back of her fingers near her mouth as if giggling "ohoho", the other hand on her hip, chin tilted up a little. Teasing and cute, not mean. Same standing position and body size as the reference, feet together on the same spot. [Style]
+
+### 11. `game_pouty.png` (you won the game)
+> [Character] Same character as the reference image. She just lost a game to the viewer and is a bit sad but a good sport: eyes slightly teary and glancing to the side, small pout with her bottom lip pushed out, cheeks lightly puffed and blushing, brows tilted up in the middle, hands clasped behind her back, shoulders a little slumped. Disappointed but cute, not crying. Same standing position and body size as the reference, feet together on the same spot. [Style]
+
+If one of these is missing (e.g. in a custom skin), the app borrows another pose: idle for excited, waiting for smug, poke for pouty.
 
 ## Not needed
 

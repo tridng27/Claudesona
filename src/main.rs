@@ -3,6 +3,7 @@
 // Drag to move, click to poke, right-click to quit.
 mod anim;
 mod cli;
+mod game;
 mod log;
 mod music;
 mod rewrite;
@@ -22,7 +23,7 @@ const HEIGHT: f32 = 250.0; // her on-screen height
 const MARGIN: f32 = 30.0; // room for sway and hops
 const GRID: (usize, usize) = (24, 36);
 const WIDTH: f32 = 340.0;
-const BUBBLE_ROOM: f32 = 230.0; // space above her head for the speech bubble (and the music player)
+const BUBBLE_ROOM: f32 = 240.0; // space above her head for the speech bubble (and the music player)
 const MINI: f32 = 0.42; // mini height relative to hers
 const REWRITE_TIMEOUT: f32 = 30.0;
 const CREAM: Color32 = Color32::from_rgb(0xFB, 0xF4, 0xEA);
@@ -40,14 +41,18 @@ const IDLE_LINES: [&str; 5] = [
 ];
 const MUSIC_AFTER: f32 = 300.0; // idle seconds before she puts music on by herself
 // "What can I do": she shows each phase in its pose while explaining it.
-const TOUR_STEP: f32 = 7.0; // seconds per step
-const TOUR: [(Pose, &str); 6] = [
+const TOUR_STEP: f32 = 6.5; // seconds per step
+const TOUR: [(Pose, &str); 10] = [
     (Pose::Idle, "Hi hi~! I'm Claudesona, your sidekick! I watch Claude Code work and tell you all about it~"),
     (Pose::Working, "When Claude gets busy, your sidekick works hard too! I show what it's doing: reading files, running commands…"),
     (Pose::Waiting, "When Claude needs your OK, I'll strike a pose and shout so you never miss it!"),
     (Pose::Idle, "When Claude finishes, your sidekick tells you the answer in my own words. Click my bubble to read more~"),
     (Pose::Poke, "Poke me and I get grumpy… but double-click me and I'll bring your terminal back!"),
-    (Pose::Music, "When it's quiet for a while, I play lofi for you~ Right-click me for music, poses, size and more!"),
+    (Pose::Music, "When it's quiet for a while, I play music for you~ A little player lets you skip, pause and pick songs!"),
+    (Pose::Excited, "Bored? Pick \"Play with me\" and we'll play a word-guessing game! I get sooo excited~"),
+    (Pose::Smug, "If your sidekick wins, you'll see this face. Ehehe~"),
+    (Pose::Pouty, "And if you win… hmph. Fine. You got lucky!"),
+    (Pose::Idle, "Right-click me any time for music, games, poses and sizes. Let's have fun together~!"),
 ];
 const WORK_MUSIC_KEY: &str = "work_music"; // eframe storage key for the "While working" choice
 const POKE_LINES: [&str; 4] = ["Hey~ I'm busy!", "Mou~ don't poke me!", "Hmph! What is it?", "That tickles... stop it!"];
@@ -55,6 +60,7 @@ const POKE_LINES: [&str; 4] = ["Hey~ I'm busy!", "Mou~ don't poke me!", "Hmph! W
 enum Msg {
     Log(PathBuf, Event),
     Rewritten { short: String, long: Option<String> },
+    Game { word: String, hint: String }, // a new hangman word from Haiku
     Hook(serde_json::Value), // from `claudesona hook`, or {"quit":true} from install/uninstall
 }
 
@@ -94,6 +100,10 @@ fn asset(name: &str) -> Option<&'static [u8]> {
         "waiting" => include_bytes!("../assets/waiting.png"),
         "poke" => include_bytes!("../assets/poke.png"),
         "music" => include_bytes!("../assets/music.png"),
+        "game_excited" => include_bytes!("../assets/game_excited.png"),
+        "game_excited_blink" => include_bytes!("../assets/game_excited_blink.png"),
+        "game_smug" => include_bytes!("../assets/game_smug.png"),
+        "game_pouty" => include_bytes!("../assets/game_pouty.png"),
         _ => return None,
     })
 }
@@ -202,6 +212,10 @@ struct App {
     work_music: bool,    // use the music pose instead of the working pose while Claude works
     tour: Option<(f32, usize)>, // "What can I do": start time and the step already said
     playlist_open: bool,
+    game: Option<game::Game>,
+    game_loading: bool,
+    recent_words: Vec<String>,  // so new rounds don't repeat
+    game_line: String, // what she's saying in the game panel
 }
 
 impl App {
@@ -217,12 +231,26 @@ impl App {
         let custom_idle = load(&ctx, "idle", true);
         let skin = custom_idle.is_some();
         let (idle, idle_alpha, idle_size) = custom_idle.or_else(|| load(&ctx, "idle", false)).expect("assets/idle.png is required");
-        let sprite = |name: &str, blink: &str| {
-            // shortcut: a missing pose falls back to idle instead of a drawn placeholder
-            let (open, alpha, size) = load(&ctx, name, skin).unwrap_or_else(|| (idle.clone(), idle_alpha.clone(), idle_size));
-            Sprite { open, blink: load(&ctx, blink, skin).map(|l| l.0), alpha, size }
+        // A missing pose borrows the closest existing one (`stand_in`), then idle.
+        let sprite = |name: &str, blink: &str, stand_in: &str| {
+            let loaded = load(&ctx, name, skin).map(|l| (l, load(&ctx, blink, skin).map(|b| b.0)));
+            let ((open, alpha, size), blink) = loaded.unwrap_or_else(|| match load(&ctx, stand_in, skin) {
+                Some(l) => (l, None),
+                None => ((idle.clone(), idle_alpha.clone(), idle_size), None),
+            });
+            Sprite { open, blink, alpha, size }
         };
-        let sprites = vec![sprite("idle", "idle_blink"), sprite("working", "working_blink"), sprite("waiting", ""), sprite("poke", ""), sprite("music", "")];
+        // Order matches the Pose enum.
+        let sprites = vec![
+            sprite("idle", "idle_blink", ""),
+            sprite("working", "working_blink", ""),
+            sprite("waiting", "", ""),
+            sprite("poke", "", ""),
+            sprite("music", "", ""),
+            sprite("game_excited", "game_excited_blink", "idle"),
+            sprite("game_smug", "", "waiting"),
+            sprite("game_pouty", "", "poke"),
+        ];
 
         let (outbox, inbox) = channel();
         let tx = outbox.clone();
@@ -275,6 +303,10 @@ impl App {
             work_music: cc.storage.and_then(|s| s.get_string(WORK_MUSIC_KEY)).is_some_and(|v| v == "true"),
             tour: None,
             playlist_open: false,
+            game: None,
+            game_loading: false,
+            recent_words: vec![],
+            game_line: String::new(),
         }
     }
 
@@ -320,12 +352,25 @@ impl App {
         if on {
             music::play();
             self.music = Some(false);
-            self.say("Lofi time~ Your sidekick picked a chill one for you!".into(), None, t - 4.0);
+            self.say("Music time~ Your sidekick picked a nice one for you!".into(), None, t - 4.0);
         } else {
             music::stop();
             self.music = None;
             self.idle_since = t; // stopping it means no auto-play for another while
         }
+    }
+
+    /// Asks Haiku for a word on a worker thread; the panel shows "thinking" until it arrives.
+    fn start_game(&mut self) {
+        (self.game, self.game_loading, self.tour) = (None, true, None);
+        self.game_line = game::line(&game::THINKING, self.rand01(), "");
+        let (tx, wake, avoid) = (self.outbox.clone(), self.ctx.clone(), self.recent_words.clone());
+        let seed = (self.rand01() * 1_000_000.0) as u32;
+        std::thread::spawn(move || {
+            let (word, hint) = game::new_word(seed, &avoid);
+            let _ = tx.send(Msg::Game { word, hint });
+            wake.request_repaint();
+        });
     }
 
     fn handle(&mut self, msg: Msg, t: f32) {
@@ -339,6 +384,17 @@ impl App {
                 if self.pending_reply.take().is_some() {
                     self.pose = self.rest();
                     self.say(short, long, t);
+                }
+                return;
+            }
+            Msg::Game { word, hint } => {
+                if self.game_loading {
+                    self.recent_words.push(word.clone());
+                    if self.recent_words.len() > 12 {
+                        self.recent_words.remove(0);
+                    }
+                    self.game_line = game::line(&game::START, self.rand01(), "");
+                    (self.game, self.game_loading) = (Some(game::Game::new(word, hint)), false);
                 }
                 return;
             }
@@ -499,6 +555,15 @@ impl eframe::App for App {
             Pose::Working if self.work_music => Pose::Music,
             p => p,
         };
+        // The game takes her bubble space while open, except when Claude needs your OK.
+        let game_shown = (self.game.is_some() || self.game_loading) && self.pose != Pose::Waiting;
+        if game_shown {
+            pose = match &self.game {
+                Some(g) if g.won() => Pose::Pouty,
+                Some(g) if g.lost() => Pose::Smug,
+                _ => Pose::Excited,
+            };
+        }
         if poke_t.is_some() {
             pose = Pose::Poke;
         }
@@ -509,7 +574,7 @@ impl eframe::App for App {
                 pose = *tour_pose;
                 if step != said {
                     self.tour = Some((start, step));
-                    if step == 3 {
+                    if step == 3 || step == TOUR.len() - 1 {
                         self.sparkle_at = t;
                     }
                 }
@@ -533,7 +598,7 @@ impl eframe::App for App {
             self.music = Some(true);
         }
         // Idle with nothing on screen for a while: sparkle and offer to help. Not while music plays: that's chill time.
-        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() {
+        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.game.is_some() || self.game_loading {
             self.nudge_at = t + IDLE_NUDGE;
         } else if t > self.nudge_at {
             let line = IDLE_LINES[(self.rand01() * IDLE_LINES.len() as f32) as usize % IDLE_LINES.len()];
@@ -599,7 +664,7 @@ impl eframe::App for App {
                     }
                 }
             });
-            if ui.button(if self.music.is_some() { "Stop music" } else { "Play lofi music" }).clicked() {
+            if ui.button(if self.music.is_some() { "Stop music" } else { "Play music" }).clicked() {
                 self.set_music(self.music.is_none(), t);
                 ui.close();
             }
@@ -614,6 +679,10 @@ impl eframe::App for App {
                     ui.close();
                 }
             });
+            if ui.button("Play with me").clicked() {
+                self.start_game();
+                ui.close();
+            }
             if ui.button("What can I do").clicked() {
                 self.tour = Some((t, usize::MAX));
                 ui.close();
@@ -684,7 +753,7 @@ impl eframe::App for App {
         // Media player above her head while music is on; her speech bubble sits above it.
         let mut anchor = pos2(area.center().x, (feet.y - HEIGHT + 4.0).max(area.top() + 2.0));
         let mut list_shown = false;
-        if let Some(st) = player {
+        if let Some(st) = player.filter(|_| !game_shown) {
             let w = WIDTH - 40.0;
             let card = Rect::from_min_size(anchor - vec2(w / 2.0, 62.0), vec2(w, 58.0));
             painter.rect(card, 10.0, CREAM, Stroke::new(2.0, CORAL), egui::StrokeKind::Inside);
@@ -728,7 +797,7 @@ impl eframe::App for App {
             anchor.y = card.top() - 4.0;
             if self.playlist_open {
                 // All songs, above the player, in place of her bubble.
-                let row = 22.0;
+                let row = 19.0;
                 let h = music::COUNT as f32 * row + 12.0;
                 let list = Rect::from_min_size(pos2(card.left(), anchor.y - h), vec2(w, h));
                 painter.rect(list, 10.0, CREAM, Stroke::new(2.0, CORAL), egui::StrokeKind::Inside);
@@ -755,6 +824,91 @@ impl eframe::App for App {
             }
         } else {
             self.playlist_open = false;
+        }
+
+        if game_shown {
+            // Her line, the hint, the word, the A-Z grid, then hearts and buttons.
+            let w = WIDTH - 40.0;
+            let panel = Rect::from_min_size(anchor - vec2(w / 2.0, 222.0), vec2(w, 220.0));
+            painter.rect(panel, 10.0, CREAM, Stroke::new(2.0, CORAL), egui::StrokeKind::Inside);
+            self.hit_rects.push(panel);
+            let (mut guess, mut again, mut close) = (None, false, false);
+            let mut y = panel.top() + 8.0;
+            let said = painter.layout(self.game_line.clone(), FontId::proportional(13.5), INK, w - 20.0);
+            painter.galley(pos2(panel.left() + 10.0, y), said, INK);
+            y += 38.0;
+            if let Some(g) = &self.game {
+                let note = if g.won() {
+                    "Solved!".to_string()
+                } else if g.lost() {
+                    format!("The word was {}.", g.word)
+                } else {
+                    format!("Hint: {}", g.hint)
+                };
+                let galley = painter.layout(note, FontId::proportional(12.0), SOFT_INK, w - 20.0);
+                painter.galley(pos2(panel.left() + 10.0, y), galley, SOFT_INK);
+                y += 34.0;
+                painter.text(pos2(panel.center().x, y + 10.0), egui::Align2::CENTER_CENTER, g.masked(), FontId::monospace(20.0), INK);
+                y += 28.0;
+                // A-Z in rows of 9: click a letter to guess it.
+                let (cols, cell, gap) = (9, vec2(28.0, 22.0), 3.0);
+                let left = panel.center().x - (cols as f32 * (cell.x + gap) - gap) / 2.0;
+                for (i, c) in ('A'..='Z').enumerate() {
+                    let r = Rect::from_min_size(pos2(left + (i % cols) as f32 * (cell.x + gap), y + (i / cols) as f32 * (cell.y + gap)), cell);
+                    let used = g.guessed.contains(&c);
+                    let resp = ui.interact(r, ui.scope_id().with(("letter", i)), Sense::click());
+                    let (fill, ink) = match (used, g.word.contains(c)) {
+                        (true, true) => (CORAL.gamma_multiply(0.5), INK),
+                        (true, false) => (INK.gamma_multiply(0.06), INK.gamma_multiply(0.3)),
+                        _ if resp.hovered() && !g.over() => (CORAL.gamma_multiply(0.3), INK),
+                        _ => (CORAL.gamma_multiply(0.12), if g.over() { INK.gamma_multiply(0.4) } else { INK }),
+                    };
+                    painter.rect_filled(r, 5.0, fill);
+                    painter.text(r.center(), egui::Align2::CENTER_CENTER, c, FontId::proportional(13.0), ink);
+                    if resp.clicked() && !used && !g.over() {
+                        guess = Some(c);
+                    }
+                }
+                let lives = game::LIVES - g.misses().min(game::LIVES);
+                for i in 0..game::LIVES {
+                    let color = if i < lives { CORAL } else { CORAL.gamma_multiply(0.25) };
+                    painter.text(pos2(panel.left() + 12.0 + i as f32 * 13.0, panel.bottom() - 16.0), egui::Align2::LEFT_CENTER, "♥", FontId::proportional(13.0), color);
+                }
+            }
+            for (i, label) in ["New word", "Close"].into_iter().enumerate() {
+                let r = Rect::from_center_size(pos2(panel.right() - 50.0 - (1 - i) as f32 * 86.0, panel.bottom() - 16.0), vec2(80.0, 22.0));
+                let resp = ui.interact(r, ui.scope_id().with(("game-btn", i)), Sense::click());
+                painter.rect(r, 8.0, if resp.hovered() { CORAL.gamma_multiply(0.3) } else { CORAL.gamma_multiply(0.15) }, Stroke::new(1.0, CORAL), egui::StrokeKind::Inside);
+                painter.text(r.center(), egui::Align2::CENTER_CENTER, label, FontId::proportional(12.5), INK);
+                if resp.clicked() {
+                    (again, close) = (i == 0, i == 1);
+                }
+            }
+            if let Some(c) = guess {
+                let r = self.rand01();
+                if let Some(g) = &mut self.game {
+                    g.guess(c);
+                    let lines: &[&str] = if g.won() {
+                        &game::PLAYER_WON
+                    } else if g.lost() {
+                        &game::PLAYER_LOST
+                    } else if !g.word.contains(c) && g.misses() == game::LIVES - 1 {
+                        &game::LAST_HEART
+                    } else if g.word.contains(c) {
+                        &game::HIT
+                    } else {
+                        &game::MISS
+                    };
+                    self.game_line = game::line(lines, r, &g.word);
+                }
+            }
+            if again {
+                self.start_game();
+            }
+            if close {
+                (self.game, self.game_loading) = (None, false);
+            }
+            list_shown = true;
         }
 
         let mut toggle = false;

@@ -11,6 +11,9 @@ pub enum Pose {
     Waiting = 2,
     Poke = 3,
     Music = 4,
+    Excited = 5, // "Play with me": game in progress
+    Smug = 6,    // she won (you lost)
+    Pouty = 7,   // you won
 }
 
 struct Style {
@@ -29,6 +32,9 @@ fn style(pose: Pose) -> Style {
         Pose::Working => Style { speed: 2.2, sway: 0.6, head: 1.5, hair: 0.008, breath: 0.006, hop: 0.010, hand: 0.0 },
         Pose::Waiting => Style { speed: 1.5, sway: 2.5, head: 4.0, hair: 0.015, breath: 0.012, hop: 0.018, hand: 0.0 },
         Pose::Music => Style { speed: 0.8, sway: 2.5, head: 3.5, hair: 0.014, breath: 0.010, hop: 0.0, hand: 7.0 },
+        Pose::Excited => Style { speed: 1.8, sway: 2.0, head: 4.0, hair: 0.015, breath: 0.012, hop: 0.016, hand: 0.0 },
+        Pose::Smug => Style { speed: 0.9, sway: 2.5, head: 5.0, hair: 0.012, breath: 0.010, hop: 0.0, hand: 0.0 },
+        Pose::Pouty => Style { speed: 0.7, sway: 1.0, head: 2.0, hair: 0.008, breath: 0.006, hop: 0.0, hand: 0.0 },
         Pose::Poke => Style { speed: 1.0, sway: 0.0, head: 0.0, hair: 0.010, breath: 0.0, hop: 0.0, hand: 0.0 },
     }
 }

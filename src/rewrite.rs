@@ -1,4 +1,5 @@
 // Rewrites Claude's reply in Claudesona's voice through `claude -p`, using the user's Claude plan.
+// `ask` is the shared Haiku call; the hangman game uses it too.
 // Flag choices are explained in SPEC.md (Rewriter).
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -7,11 +8,17 @@ const PERSONA: &str = "You are Claudesona, a genki chibi anime girl desktop masc
 
 /// (short, long) in her voice, or None if `claude` failed.
 pub fn rewrite(text: &str) -> Option<(String, Option<String>)> {
+    split(&ask(PERSONA, text)?)
+}
+
+/// Runs Haiku with her fixed flag set and `system` as the system prompt; `input` goes on stdin.
+/// Blocks for a few seconds, so call it from a worker thread. None if `claude` failed.
+pub fn ask(system: &str, input: &str) -> Option<String> {
     // An empty folder, so no project CLAUDE.md is loaded.
     let dir = std::env::temp_dir().join("claudesona-rewrite");
     std::fs::create_dir_all(&dir).ok()?;
     let mut cmd = Command::new("claude");
-    cmd.args(["-p", "--model", "haiku", "--no-session-persistence", "--restricted", "--strict-mcp-config", "--tools", "", "--disable-slash-commands", "--system-prompt", PERSONA])
+    cmd.args(["-p", "--model", "haiku", "--no-session-persistence", "--restricted", "--strict-mcp-config", "--tools", "", "--disable-slash-commands", "--system-prompt", system])
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -23,13 +30,13 @@ pub fn rewrite(text: &str) -> Option<(String, Option<String>)> {
     }
     let mut child = cmd.spawn().ok()?;
     // Text goes through stdin: Windows command lines are length-limited.
-    let input: String = text.chars().take(6000).collect();
+    let input: String = input.chars().take(6000).collect();
     child.stdin.take()?.write_all(input.as_bytes()).ok()?;
     let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
-    split(&String::from_utf8_lossy(&out.stdout))
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Splits "short\n---\nlong" output.
