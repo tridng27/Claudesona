@@ -86,45 +86,47 @@ pub fn parse_line(line: &str) -> Vec<Event> {
 
 pub fn tool_label(name: &str, input: &Value) -> String {
     let file = input["file_path"].as_str().map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string());
+    let ui = crate::i18n::ui();
     match (name, file) {
-        ("Read", Some(f)) => format!("Reading {f}…"),
-        ("Edit" | "Write", Some(f)) => format!("Editing {f}…"),
+        ("Read", Some(f)) => ui.reading.replace("{f}", &f),
+        ("Edit" | "Write", Some(f)) => ui.editing.replace("{f}", &f),
         ("Bash" | "PowerShell", _) => command_line(input["command"].as_str().unwrap_or("")).into(),
-        ("Grep" | "Glob", _) => "Searching…".into(),
-        ("Agent" | "Task", _) => "Sending a helper…".into(),
-        ("WebSearch" | "WebFetch", _) => "Looking it up online…".into(),
-        _ => format!("Using {name}…"),
+        ("Grep" | "Glob", _) => ui.searching.into(),
+        ("Agent" | "Task", _) => ui.helper.into(),
+        ("WebSearch" | "WebFetch", _) => ui.online.into(),
+        _ => ui.using.replace("{name}", name),
     }
 }
 
-/// Her line for a shell command. Same command, same line; different commands vary.
+/// Her line for a shell command, in the current language. Same command, same line; different commands vary.
 fn command_line(cmd: &str) -> &'static str {
-    let lines = command_lines(cmd);
+    let lines = crate::i18n::lines().commands[command_kind(cmd)];
     lines[cmd.bytes().map(usize::from).sum::<usize>() % lines.len()]
 }
 
-/// Her lines for a kind of shell command. First matching category wins.
-fn command_lines(cmd: &str) -> &'static [&'static str] {
+/// What kind of shell command it is: 0 tests, 1 git, 2 installs, 3 builds, 4 running the app, 5 web, 6 deleting,
+/// 7 looking around, 8 anything else. First matching kind wins.
+fn command_kind(cmd: &str) -> usize {
     let c = format!(" {} ", cmd.to_lowercase().replace(['\n', ';', '|', '&', '(', ')'], " "));
     let has = |keys: &[&str]| keys.iter().any(|k| c.contains(k));
     if has(&["test", "pytest", "jest", "vitest"]) {
-        &["Running the tests… fingers crossed~!", "Test time! Please pass, please pass…", "Making sure nothing broke~"]
+        0
     } else if has(&[" git ", " gh "]) {
-        &["Poking at git~", "Checking the history books!", "Git stuff? Leave it to me~"]
+        1
     } else if has(&["install", " cargo add ", " pip ", " winget ", " npm i ", " choco "]) {
-        &["Shopping for packages~!", "Grabbing some goodies…", "Installing stuff, wait for me~"]
+        2
     } else if has(&["build", " cargo check ", " tsc ", " make ", "compile", " clippy "]) {
-        &["Building it up, piece by piece~", "Compiling… the boring part!", "Hammering it all together~"]
+        3
     } else if has(&[" cargo run ", " npm run ", " npm start ", " python ", " node ", " npx ", ".exe "]) {
-        &["Taking it for a spin~!", "Let's see if it runs!", "Starting it up… go go~!"]
+        4
     } else if has(&[" curl ", " wget ", "invoke-webrequest", "invoke-restmethod"]) {
-        &["Knock knock, internet~!", "Fetching something from the web!"]
+        5
     } else if has(&[" rm ", " del ", " rmdir ", "remove-item"]) {
-        &["Tidying up some files…", "Throwing stuff out~ careful, careful!"]
+        6
     } else if has(&[" ls ", " dir ", " cat ", " grep ", " rg ", " find ", " head ", " tail ", " wc ", " sed ", "get-childitem", "get-content", "select-string"]) {
-        &["Peeking around the files~", "Snooping through folders!", "Just taking a little look~"]
+        7
     } else {
-        &["Running a command…", "Typing magic words in the terminal~", "Command, go~!"]
+        8
     }
 }
 
@@ -232,7 +234,8 @@ mod tests {
 
     #[test]
     fn commands_get_lines_by_kind() {
-        let is = |cmd: &str, word: &str| assert!(command_lines(cmd)[0].to_lowercase().contains(word), "{cmd} -> {}", command_lines(cmd)[0]);
+        let first = |cmd: &str| crate::i18n::lines().commands[command_kind(cmd)][0];
+        let is = |cmd: &str, word: &str| assert!(first(cmd).to_lowercase().contains(word), "{cmd} -> {}", first(cmd));
         is("cargo test parse", "test");
         is("cd /c/x && git status", "git");
         is("npm install", "packages");

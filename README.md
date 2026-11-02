@@ -25,12 +25,30 @@ There are six slow, chill songs, each with a written melody that phrases like su
 
 | Song | Feel |
 | :- | :- |
-| Rainy Window Seat | electric piano chords, a hummed melody, lazy boom-bap beat |
+| Rainy Window Seat | classic lofi hip-hop: dusty wobbly electric piano, heavy swing, pumping beat |
 | Last Bus Home | vibraphone chords, piano melody, soft boom-bap |
 | Sunday Matcha | piano and music box, soft shaker |
 | Night Shift Neon | warm pad and electric piano, slow R&B groove, deep 808 bass |
 | Letters Never Sent | slow ballad, strings and flute |
 | Moonlit Walk Home | slow ballad, piano |
+
+#### Your own songs and playlists
+
+Pick **Open music folder** from her right-click menu (or **Add songs** in the song list). It opens `%LOCALAPPDATA%\Programs\Claudesona\music` in Explorer:
+
+- Make a folder inside it and drop songs in: each folder is a playlist named after the folder.
+- Songs placed directly in the music folder show up as "My music".
+- MP3, WAV, WMA, M4A, AAC and FLAC work (whatever Windows can play). A file that won't play is skipped.
+
+In the song list, the arrows next to the playlist name switch between "Claudesona's songs" and your playlists; click a song to play that playlist. The button on the left of the player cycles how the next song is picked:
+
+| Mode | Next song |
+| :- | :- |
+| Loop | the playlist in order, then from the top |
+| Loop 1 | the same song again |
+| Shuffle | a random song from the playlist |
+
+Your playlist and mode are remembered.
 
 <p align="center"><img src="docs/music.gif" alt="The music player above Claudesona: the song list opens and a new song starts" width="330"></p>
 
@@ -62,7 +80,7 @@ To update, run `install` again with the new exe. It replaces the running copy.
 
 ## Uninstall
 
-Run `claudesona.exe uninstall`. It removes her hooks (and nothing else) from `settings.json` and closes her. Then delete `%LOCALAPPDATA%\Programs\Claudesona`.
+Run `claudesona.exe uninstall`. It removes her hooks (and nothing else) from `settings.json` and closes her. Then delete `%LOCALAPPDATA%\Programs\Claudesona` (move your `music` folder out first if you want to keep your songs).
 
 ## Using her
 
@@ -72,15 +90,17 @@ Run `claudesona.exe uninstall`. It removes her hooks (and nothing else) from `se
 - **Double-click** her to bring back the terminal you last sent a prompt from.
 - **Right-click** for the menu:
   - **Size**: S, M or L
+  - **Language**: EN or VI. In Vietnamese she calls herself "tớ" or "Phụ tá" and calls you "cậu"; her menus, lines, reply rewrites and the word game all switch (game words are Vietnamese written without tone marks, like MEO for "mèo", since you guess on an A-Z grid)
   - **Play music** / **Stop music**
   - **While working**: show her working pose or her music pose while Claude works
+  - **Open music folder**: add your own songs and playlists
   - **Play with me**: the word game
   - **What can I do**: she introduces herself and shows each of her poses
   - **Hide for 10 min**: she keeps following Claude, invisible and click-through
   - **Quit**: until the next Claude Code session
 - Clicks anywhere else pass through to the windows behind her.
 
-Size, position and the "While working" choice are remembered.
+Size, position, language, the "While working" choice, your playlist and the play mode are remembered.
 
 ## Custom art
 

@@ -8,75 +8,45 @@ const CATEGORIES: [&str; 14] = [
     "computers", "fantasy creatures", "jobs", "nature", "household objects", "travel",
 ];
 
-const PROMPT: &str = "You pick words for a hangman game played with Claudesona, a cute genki anime desktop mascot. \
+const PROMPT_EN: &str = "You pick words for a hangman game played with Claudesona, a cute, bubbly anime desktop mascot. \
 Choose one common English noun from the given category: 4 to 9 letters, letters only, not one in the avoid list. \
-Write a short playful hint of at most 12 words in her cheerful voice that does not contain the word. \
+Write a short playful hint of at most 12 words in her cheerful voice that does not contain the word, \
+in plain English with no Japanese words (no senpai, nya, desu, kawaii, mou). \
 Output exactly two lines and nothing else:\nWORD: <word>\nHINT: <hint>";
 
+// Vietnamese words are typed on the same A-Z grid, so they come without accents or tone marks (MEO for "mèo").
+const PROMPT_VI: &str = "You pick words for a hangman game played in Vietnamese with Claudesona, a cute, bubbly anime desktop mascot. \
+Choose one common Vietnamese word from the given category: a single syllable, 3 to 7 letters, written in capital letters \
+WITHOUT any accents or tone marks (A-Z only, write đ as D), not one in the avoid list. \
+Write a short playful hint in Vietnamese of at most 15 words, in her cheerful voice: she calls herself \"tớ\" and the player \"cậu\". \
+The hint must not contain the word. No Japanese words. \
+Output exactly two lines and nothing else:\nWORD: <word>\nHINT: <hint>";
+
+const FALLBACK_VI: [(&str, &str); 10] = [
+    ("MEO", "Bạn nhỏ bốn chân mê cá và hay rừ rừ~"),
+    ("SACH", "Cậu đọc nó mỗi tối trước khi ngủ nè!"),
+    ("BIEN", "Nước mặn, sóng vỗ rì rào~"),
+    ("TRANG", "Tròn vành vạnh trên trời đêm Trung thu!"),
+    ("HOA", "Thơm thơm, nở rộ vào mùa xuân~"),
+    ("MUA", "Rơi lộp độp từ trên trời xuống!"),
+    ("TRA", "Uống nóng hay đá đều ngon, tớ thích lắm~"),
+    ("BANH", "Ngọt ngọt, ăn kèm trà là tuyệt nhất!"),
+    ("CHO", "Bạn thân bốn chân hay vẫy đuôi~"),
+    ("SAO", "Lấp lánh trên trời mỗi đêm!"),
+];
+
 // Used when `claude` isn't available or answers oddly, so the game still works.
-const FALLBACK: [(&str, &str); 10] = [
+const FALLBACK_EN: [(&str, &str); 10] = [
     ("PANDA", "A fluffy black-and-white bear that munches bamboo~"),
     ("COMET", "A sparkly space traveler with a glowing tail!"),
     ("GUITAR", "Six strings, lots of feelings~"),
     ("TEAPOT", "It whistles when it's ready for snack time!"),
     ("PENGUIN", "A tuxedo bird that can't fly but swims super fast~"),
     ("RAINBOW", "Seven colors after the rain!"),
-    ("KEYBOARD", "Your sidekick taps on this all day~"),
+    ("KEYBOARD", "Your sidekick taps on this all day~ (・ω・)"),
     ("DRAGON", "A fire-breathing friend from storybooks!"),
     ("MANGO", "A sweet golden fruit, so juicy~"),
     ("LIGHTHOUSE", "It shines for ships at night!"),
-];
-
-// Her lines during the game. `{w}` is replaced by the word.
-pub const THINKING: [&str; 3] = [
-    "Hmm… thinking of a super tricky word…",
-    "Wait wait, your sidekick is picking a good one~",
-    "Ehehe, let me find something sneaky…",
-];
-pub const START: [&str; 6] = [
-    "Ooh, I've got a good one! Can you guess it~?",
-    "Your sidekick picked a tricky word… good luck!",
-    "Game time! Don't let your sidekick win~",
-    "Hehe, ready? This one's sneaky!",
-    "I bet you can't get this one~!",
-    "Ready, set… guess! I'm so excited~!",
-];
-pub const HIT: [&str; 6] = [
-    "Eh?! How did you know that one?",
-    "Ooh, nice guess~!",
-    "Hmm, you're getting close…",
-    "Lucky letter! Keep going~",
-    "W-wait, that's a good one!",
-    "Nngh, you found one!",
-];
-pub const MISS: [&str; 6] = [
-    "Nope~! Try again!",
-    "Hehe, not that one~",
-    "Your sidekick is winning~!",
-    "Wrong-o! Ehehe~",
-    "Ooh, so close… not!",
-    "Bzzt! That letter isn't in it~",
-];
-pub const LAST_HEART: [&str; 3] = [
-    "Eek, one heart left! Choose wisely~",
-    "Last heart… are you nervous yet~?",
-    "One more miss and your sidekick wins! Hehe~",
-];
-pub const PLAYER_WON: [&str; 6] = [
-    "Booo~ you got lucky! …Well done, though.",
-    "Mou~ you guessed it! Fine, you win this time.",
-    "Hmph! Beginner's luck… but nice job!",
-    "No fair~! Okay okay, well played!",
-    "Aww, your sidekick lost… you're pretty good!",
-    "Grr… rematch! But, um, good job~",
-];
-pub const PLAYER_LOST: [&str; 6] = [
-    "Hehe~ I won! The word was {w}!",
-    "Victory for your sidekick~! It was {w}!",
-    "Ehehe, too tricky for you? It was {w}~",
-    "Your sidekick wins again! {w}, obviously~",
-    "Better luck next time! The answer was {w}!",
-    "Ohoho~ {w}! Your sidekick is unbeatable!",
 ];
 
 /// One of `lines` for a random `r` in 0..1, with the word filled in.
@@ -124,14 +94,18 @@ impl Game {
     }
 }
 
-/// A new (word, hint) from Haiku. Blocks for a few seconds: call it from a worker thread.
+/// A new (word, hint) from Haiku in the current language. Blocks for a few seconds: call it from a worker thread.
 /// `avoid` holds recent words, so rounds don't repeat.
 pub fn new_word(seed: u32, avoid: &[String]) -> (String, String) {
+    let (prompt, fallback) = match crate::i18n::lang() {
+        crate::i18n::Lang::En => (PROMPT_EN, &FALLBACK_EN),
+        crate::i18n::Lang::Vi => (PROMPT_VI, &FALLBACK_VI),
+    };
     let category = CATEGORIES[seed as usize % CATEGORIES.len()];
     let input = format!("Category: {category}\nAvoid: {}\nRandom number: {seed}", avoid.join(", "));
-    crate::rewrite::ask(PROMPT, &input).and_then(|out| parse(&out)).filter(|(w, _)| !avoid.contains(w)).unwrap_or_else(|| {
-        let fresh: Vec<_> = FALLBACK.iter().filter(|(w, _)| !avoid.iter().any(|a| a == w)).collect();
-        let (w, h) = if fresh.is_empty() { FALLBACK[seed as usize % FALLBACK.len()] } else { *fresh[seed as usize % fresh.len()] };
+    crate::rewrite::ask(prompt, &input).and_then(|out| parse(&out)).filter(|(w, _)| !avoid.contains(w)).unwrap_or_else(|| {
+        let fresh: Vec<_> = fallback.iter().filter(|(w, _)| !avoid.iter().any(|a| a == w)).collect();
+        let (w, h) = if fresh.is_empty() { fallback[seed as usize % fallback.len()] } else { *fresh[seed as usize % fresh.len()] };
         (w.to_string(), h.to_string())
     })
 }
@@ -139,9 +113,11 @@ pub fn new_word(seed: u32, avoid: &[String]) -> (String, String) {
 /// Reads "WORD: ...\nHINT: ..." and checks the word is plain letters and absent from the hint.
 fn parse(out: &str) -> Option<(String, String)> {
     let field = |key: &str| out.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()));
-    let word = field("WORD:")?.to_uppercase();
+    let word = crate::i18n::fold(&field("WORD:")?).to_uppercase(); // in case Haiku leaves a Vietnamese mark on
     let hint = field("HINT:")?;
-    let ok = (3..=12).contains(&word.len()) && word.chars().all(|c| c.is_ascii_uppercase()) && !hint.to_uppercase().contains(&word) && !hint.is_empty();
+    // Compared without accents too, so "mèo" in a hint still counts as giving away MEO.
+    let gives_away = crate::i18n::fold(&hint).to_uppercase().contains(&word);
+    let ok = (3..=12).contains(&word.len()) && word.chars().all(|c| c.is_ascii_uppercase()) && !gives_away && !hint.is_empty();
     ok.then_some((word, hint))
 }
 
@@ -156,6 +132,8 @@ mod tests {
         assert_eq!(parse("WORD: ice cream\nHINT: Cold and sweet"), None); // not letters only
         assert_eq!(parse("WORD: CAT\nHINT: A cat says meow"), None); // gives the word away
         assert_eq!(parse("just chatting"), None);
+        assert_eq!(parse("WORD: MÈO\nHINT: Bạn nhỏ mê cá~"), Some(("MEO".into(), "Bạn nhỏ mê cá~".into()))); // marks folded
+        assert_eq!(parse("WORD: MEO\nHINT: Con mèo kêu meo meo"), None); // gives it away, accents or not
     }
 
     #[test]

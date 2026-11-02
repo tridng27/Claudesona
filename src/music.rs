@@ -1,6 +1,7 @@
 // Lofi music she plays for you. It's synthesized here (no audio files, no network), so it's royalty-free by construction.
 // A player thread renders a track and plays it with Windows' PlaySound; the app drives it with play/pause/next/seek.
 use std::f32::consts::TAU;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -95,7 +96,7 @@ enum Inst {
     PianoArp,    // acoustic piano broken chords over a quiet string bed
     MusicBox,    // light plinky tines (leads)
     Flute,       // soft breathy-free flute with gentle vibrato (leads)
-    Hum,         // a soft hummed "ooh", like a singer without words (leads)
+    DustyKeys,   // electric piano through a worn tape: mellower, with a slow pitch wobble
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -117,38 +118,139 @@ struct Track {
     melody: f32, // chance of a melody note per eighth (when there's no tune)
     tune: &'static [&'static [(f32, f32, f32)]], // written melody over progs[0], one bar per chord: (beat, MIDI note, beats long); empty = improvised
     warmth: f32, // low-pass amount: lower is darker
+    lofi: bool,  // lofi hip-hop treatment: heavier swing, everything but the kick dips on each kick, quieter melody
 }
 
 const TRACKS: [Track; 6] = [
-    Track { name: "Rainy Window Seat", bpm: 66.0, transpose: 0.0, progs: [FMAJ_EM_DM_CMAJ, DM9_G13_CMAJ9_AM7], chords: Inst::Keys, lead: Inst::Hum, groove: Groove::BoomBap, melody: 0.14, tune: &RAINY, warmth: 0.36 },
-    Track { name: "Last Bus Home", bpm: 70.0, transpose: -2.0, progs: [AM7_DM7_G7_CMAJ7, CMAJ_AM_FMAJ_G7], chords: Inst::Vibes, lead: Inst::Piano, groove: Groove::BoomBap, melody: 0.12, tune: &LAST_BUS, warmth: 0.38 },
-    Track { name: "Sunday Matcha", bpm: 76.0, transpose: 1.0, progs: [CMAJ_AM_FMAJ_G7, FMAJ_EM_DM_CMAJ], chords: Inst::PianoArp, lead: Inst::MusicBox, groove: Groove::Soft, melody: 0.14, tune: &SUNDAY, warmth: 0.44 },
-    Track { name: "Night Shift Neon", bpm: 64.0, transpose: -3.0, progs: [EBMAJ_DM_CM_BBMAJ, BBMAJ_AM_GM_FMAJ], chords: Inst::Pad, lead: Inst::Keys, groove: Groove::RnB, melody: 0.12, tune: &NIGHT_SHIFT, warmth: 0.33 },
-    Track { name: "Letters Never Sent", bpm: 58.0, transpose: 0.0, progs: [C_G_AM_F, C_G_AM_F], chords: Inst::Pad, lead: Inst::Flute, groove: Groove::Ballad, melody: 0.0, tune: &LETTERS, warmth: 0.42 },
-    Track { name: "Moonlit Walk Home", bpm: 60.0, transpose: -2.0, progs: [AM_F_C_G, AM_F_C_G], chords: Inst::PianoArp, lead: Inst::Piano, groove: Groove::Ballad, melody: 0.0, tune: &MOONLIT, warmth: 0.44 },
+    Track { name: "Rainy Window Seat", bpm: 74.0, transpose: 0.0, progs: [FMAJ_EM_DM_CMAJ, DM9_G13_CMAJ9_AM7], chords: Inst::DustyKeys, lead: Inst::DustyKeys, groove: Groove::BoomBap, melody: 0.12, tune: &RAINY, warmth: 0.30, lofi: true },
+    Track { name: "Last Bus Home", bpm: 70.0, transpose: -2.0, progs: [AM7_DM7_G7_CMAJ7, CMAJ_AM_FMAJ_G7], chords: Inst::Vibes, lead: Inst::Piano, groove: Groove::BoomBap, melody: 0.12, tune: &LAST_BUS, warmth: 0.38, lofi: false },
+    Track { name: "Sunday Matcha", bpm: 76.0, transpose: 1.0, progs: [CMAJ_AM_FMAJ_G7, FMAJ_EM_DM_CMAJ], chords: Inst::PianoArp, lead: Inst::MusicBox, groove: Groove::Soft, melody: 0.14, tune: &SUNDAY, warmth: 0.44, lofi: false },
+    Track { name: "Night Shift Neon", bpm: 64.0, transpose: -3.0, progs: [EBMAJ_DM_CM_BBMAJ, BBMAJ_AM_GM_FMAJ], chords: Inst::Pad, lead: Inst::Keys, groove: Groove::RnB, melody: 0.12, tune: &NIGHT_SHIFT, warmth: 0.33, lofi: false },
+    Track { name: "Letters Never Sent", bpm: 58.0, transpose: 0.0, progs: [C_G_AM_F, C_G_AM_F], chords: Inst::Pad, lead: Inst::Flute, groove: Groove::Ballad, melody: 0.0, tune: &LETTERS, warmth: 0.42, lofi: false },
+    Track { name: "Moonlit Walk Home", bpm: 60.0, transpose: -2.0, progs: [AM_F_C_G, AM_F_C_G], chords: Inst::PianoArp, lead: Inst::Piano, groove: Groove::Ballad, melody: 0.0, tune: &MOONLIT, warmth: 0.44, lofi: false },
 ];
 
-#[derive(Clone, Copy)]
+/// How the next song is chosen.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Mode {
+    Loop,    // the playlist in order, then from the top
+    LoopOne, // the same song again
+    Shuffle, // a random song, never the same twice in a row
+}
+
+impl Mode {
+    pub fn next(self) -> Mode {
+        match self {
+            Mode::Loop => Mode::LoopOne,
+            Mode::LoopOne => Mode::Shuffle,
+            Mode::Shuffle => Mode::Loop,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Loop => "Loop",
+            Mode::LoopOne => "Loop 1",
+            Mode::Shuffle => "Shuffle",
+        }
+    }
+    pub fn from_label(s: &str) -> Option<Mode> {
+        [Mode::Loop, Mode::LoopOne, Mode::Shuffle].into_iter().find(|m| m.label() == s)
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+enum Song {
+    Synth(usize),  // one of TRACKS
+    File(PathBuf), // from the music folder
+}
+
+impl Song {
+    fn title(&self) -> String {
+        match self {
+            Song::Synth(i) => TRACKS[*i].name.to_string(),
+            Song::File(p) => p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Playlist {
+    name: String,
+    songs: Vec<Song>,
+}
+
+pub const BUILT_IN: &str = "Claudesona's songs";
+pub const LOOSE: &str = "My music"; // files directly in the music folder
+const AUDIO: [&str; 6] = ["mp3", "wav", "wma", "m4a", "aac", "flac"];
+
+/// `music` next to the exe, like `skin`. Each subfolder with audio files is a playlist.
+pub fn music_dir() -> PathBuf {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("music"))).unwrap_or_else(|| PathBuf::from("music"))
+}
+
+/// The built-in songs, then "My music" (loose files), then one playlist per subfolder, all sorted by name.
+fn scan(dir: &Path) -> Vec<Playlist> {
+    let audio = |p: &Path| p.extension().is_some_and(|e| AUDIO.contains(&e.to_string_lossy().to_lowercase().as_str()));
+    let files = |d: &Path| {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file() && audio(p)).collect();
+        v.sort();
+        v.into_iter().map(Song::File).collect::<Vec<_>>()
+    };
+    let mut lists = vec![Playlist { name: BUILT_IN.into(), songs: (0..TRACKS.len()).map(Song::Synth).collect() }];
+    let loose = files(dir);
+    if !loose.is_empty() {
+        lists.push(Playlist { name: LOOSE.into(), songs: loose });
+    }
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    folders.sort();
+    for f in folders {
+        let songs = files(&f);
+        if !songs.is_empty() {
+            lists.push(Playlist { name: f.file_name().unwrap_or_default().to_string_lossy().into_owned(), songs });
+        }
+    }
+    lists
+}
+
+/// Which song plays after `cur` (of `len`) in `mode`. `skip` is a Next press: Loop 1 moves on then too.
+fn after(mode: Mode, cur: usize, len: usize, skip: bool, rng: &mut Rng) -> usize {
+    match mode {
+        Mode::LoopOne if !skip => cur,
+        Mode::Shuffle if len > 1 => {
+            let i = (rng.next() * len as f32) as usize % len;
+            if i == cur { (i + 1) % len } else { i }
+        }
+        _ => (cur + 1) % len.max(1),
+    }
+}
+
+#[derive(Clone)]
 pub struct Status {
+    pub playlist: usize,
     pub track: usize,
+    pub name: String,
     pub pos: f32, // seconds
     pub len: f32,
     pub paused: bool,
 }
 
 enum Cmd {
-    Play(Option<usize>), // a given track, or a random one
+    Play(Option<(usize, usize)>), // (playlist, song), or carry on with the current playlist
     Next,
     Prev,
     Pause, // toggles
     Seek(f32),
     Stop,
+    SetMode(Mode),
+    Select(String), // make a playlist current by name, without playing
+    Rescan,
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
+static LIBRARY: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(vec![]); // playlist names and song titles, for the UI
 static PLAYER: OnceLock<Sender<Cmd>> = OnceLock::new();
 
-/// Commands go to one player thread, which owns the sound buffer and makes every PlaySound call.
+/// Commands go to one player thread, which owns the sound and makes every PlaySound and MCI call.
 fn send(cmd: Cmd) {
     let _ = PLAYER
         .get_or_init(|| {
@@ -162,8 +264,8 @@ fn send(cmd: Cmd) {
 pub fn play() {
     send(Cmd::Play(None));
 }
-pub fn play_track(i: usize) {
-    send(Cmd::Play(Some(i)));
+pub fn play_track(playlist: usize, song: usize) {
+    send(Cmd::Play(Some((playlist, song))));
 }
 pub fn next() {
     send(Cmd::Next);
@@ -180,85 +282,246 @@ pub fn seek(secs: f32) {
 pub fn stop() {
     send(Cmd::Stop);
 }
-/// What's playing, or None when stopped. Shows the old track for the moment a new one takes to render.
-pub fn status() -> Option<Status> {
-    *STATUS.lock().unwrap()
+pub fn set_mode(mode: Mode) {
+    send(Cmd::SetMode(mode));
 }
-pub const COUNT: usize = TRACKS.len();
-pub fn name(i: usize) -> &'static str {
-    TRACKS[i].name
+/// Restores the saved playlist at startup (the built-in one if that folder is gone).
+pub fn select(playlist: &str) {
+    send(Cmd::Select(playlist.to_string()));
+}
+/// Re-reads the music folder; the song list calls this when it opens.
+pub fn rescan() {
+    send(Cmd::Rescan);
+}
+/// What's playing, or None when stopped.
+pub fn status() -> Option<Status> {
+    STATUS.lock().unwrap().clone()
+}
+/// Playlist names with their song titles.
+pub fn library() -> Vec<(String, Vec<String>)> {
+    LIBRARY.lock().unwrap().clone()
 }
 
-/// Plays tracks back to back in random order (never the same twice in a row) until Stop.
+/// The library for the UI: playlist names and song titles.
+fn publish(lists: &[Playlist]) {
+    *LIBRARY.lock().unwrap() = lists.iter().map(|l| (l.name.clone(), l.songs.iter().map(Song::title).collect())).collect();
+}
+
+/// Re-reads the music folder, keeping the current playlist and song by name/path (files may have come or gone around
+/// them). A playlist that's gone falls back to the built-in one; a song that's gone leaves `cur` empty.
+fn refresh(lists: &mut Vec<Playlist>, list: &mut usize, cur: &mut Option<usize>) {
+    let (name, playing) = (lists[*list].name.clone(), cur.map(|c| lists[*list].songs[c].clone()));
+    *lists = scan(&music_dir());
+    publish(lists);
+    *list = lists.iter().position(|l| l.name == name).unwrap_or(0);
+    *cur = playing.and_then(|p| lists[*list].songs.iter().position(|s| *s == p));
+}
+
+/// The song a playlist starts with: the first one, or a random one in Shuffle.
+fn first(mode: Mode, len: usize, rng: &mut Rng) -> usize {
+    if mode == Mode::Shuffle { (rng.next() * len as f32) as usize % len.max(1) } else { 0 }
+}
+
+/// Sends an MCI command string (Windows' media player engine plays the user's files). Err on failure.
+fn mci(cmd: &str) -> Result<String, u32> {
+    use windows_sys::Win32::Media::Multimedia::mciSendStringW;
+    let wide: Vec<u16> = cmd.encode_utf16().chain([0]).collect();
+    let mut out = [0u16; 128];
+    let err = unsafe { mciSendStringW(wide.as_ptr(), out.as_mut_ptr(), out.len() as u32, std::ptr::null_mut()) };
+    let end = out.iter().position(|c| *c == 0).unwrap_or(out.len());
+    if err == 0 { Ok(String::from_utf16_lossy(&out[..end])) } else { Err(err) }
+}
+
+/// One song at a time: a synthesized track through PlaySound, or a file through MCI.
+struct Deck {
+    synth: Option<(usize, Vec<f32>)>, // rendered built-in track, kept so pause/seek/Loop 1 don't re-render
+    _playing: Vec<u8>,                // WAV bytes Windows is reading; must outlive playback
+    file: bool,                       // an MCI file is open as "claudesona"
+    len: f32,
+    from: f32, // synth: where the playing buffer starts
+    since: Instant,
+    paused: bool,
+}
+
+impl Deck {
+    fn silence(&mut self) {
+        use windows_sys::Win32::Media::Audio::PlaySoundW;
+        unsafe { PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0) };
+        if self.file {
+            let _ = mci("close claudesona");
+            self.file = false;
+        }
+    }
+
+    /// Starts `song` `at` seconds in. Err if the file can't be played (unsupported format, missing).
+    fn start(&mut self, song: &Song, at: f32, seed: u32) -> Result<(), ()> {
+        self.silence(); // Windows stops reading the old buffer before it's replaced
+        self.paused = false;
+        match song {
+            Song::Synth(t) => {
+                if self.synth.as_ref().is_none_or(|(i, _)| i != t) {
+                    self.synth = Some((*t, render(&TRACKS[*t], seed)));
+                }
+                let pcm = &self.synth.as_ref().unwrap().1;
+                let skip = ((at.max(0.0) * RATE as f32) as usize).min(pcm.len());
+                self.len = pcm.len() as f32 / RATE as f32;
+                self._playing = wav(&pcm[skip..]);
+                use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+                // Async: a blocking PlaySound can't be stopped from another call.
+                unsafe { PlaySoundW(self._playing.as_ptr() as *const u16, std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
+                (self.from, self.since) = (skip as f32 / RATE as f32, Instant::now());
+                Ok(())
+            }
+            Song::File(p) => {
+                mci(&format!("open \"{}\" type mpegvideo alias claudesona", p.display())).map_err(|_| ())?;
+                self.file = true;
+                let ok = mci("set claudesona time format milliseconds").is_ok()
+                    && mci(&format!("play claudesona from {}", (at.max(0.0) * 1000.0) as u32)).is_ok();
+                self.len = mci("status claudesona length").ok().and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0) / 1000.0;
+                if !ok || self.len <= 0.0 {
+                    self.silence();
+                    return Err(());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn pos(&self) -> f32 {
+        if self.file {
+            mci("status claudesona position").ok().and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0) / 1000.0
+        } else if self.paused {
+            self.from
+        } else {
+            self.from + self.since.elapsed().as_secs_f32()
+        }
+    }
+
+    fn ended(&self) -> bool {
+        !self.paused && (self.synth.is_some() || self.file) && if self.file { mci("status claudesona mode").is_ok_and(|m| m.trim() == "stopped") } else { self.pos() >= self.len }
+    }
+}
+
+/// Plays songs back to back from the current playlist until Stop, choosing each next one by the mode.
 fn player(rx: Receiver<Cmd>) {
-    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
-    let silence = || unsafe { PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0) };
     let mut rng = Rng(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() | 1);
     let mut seed = 1u32;
-    // `_playing` is only read by Windows, through the pointer given to PlaySound; it must outlive playback.
-    let (mut cur, mut pcm, mut _playing) = (None::<usize>, Vec::<f32>::new(), Vec::<u8>::new());
-    let mut history: Vec<usize> = vec![]; // for Prev
-    let (mut from, mut since, mut paused) = (0.0f32, Instant::now(), false); // the buffer starts at `from` seconds
+    let mut lists = scan(&music_dir());
+    publish(&lists);
+    let mut deck = Deck { synth: None, _playing: vec![], file: false, len: 0.0, from: 0.0, since: Instant::now(), paused: false };
+    let (mut list, mut cur, mut mode) = (0usize, None::<usize>, Mode::Shuffle);
+    let mut history: Vec<usize> = vec![]; // for Prev in shuffle
     loop {
         let cmd = match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(c) => Some(c),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => return,
         };
-        let len = pcm.len() as f32 / RATE as f32;
-        let pos = if paused { from } else { from + since.elapsed().as_secs_f32() };
-        let mut start = None; // (track, seconds in) to play from
+        let len = lists[list].songs.len();
+        let mut start = None; // (song, seconds in)
         match (cmd, cur) {
-            (Some(Cmd::Play(t)), _) => start = Some((t.unwrap_or_else(|| pick(&mut rng, cur)), 0.0)),
-            (Some(Cmd::Next), Some(c)) => start = Some((pick(&mut rng, Some(c)), 0.0)),
+            (Some(Cmd::Play(Some((l, s)))), _) if l < lists.len() && s < lists[l].songs.len() => {
+                if l != list {
+                    (list, cur) = (l, None);
+                    history.clear();
+                    deck.synth = None;
+                }
+                start = Some((s, 0.0));
+            }
+            (Some(Cmd::Play(None)), _) => {
+                // Re-read the folder first: the saved playlist may have been changed or deleted since.
+                refresh(&mut lists, &mut list, &mut cur);
+                start = Some((first(mode, lists[list].songs.len(), &mut rng), 0.0));
+            }
+            (Some(Cmd::Next), Some(c)) => start = Some((after(mode, c, len, true, &mut rng), 0.0)),
             (Some(Cmd::Prev), Some(c)) => {
-                // Like most players: past 3s, restart the track; otherwise go back one.
-                if pos > 3.0 || history.len() < 2 {
+                // Like most players: past 3s, restart the song; otherwise go back one.
+                if deck.pos() > 3.0 {
                     start = Some((c, 0.0));
-                } else {
+                } else if mode == Mode::Shuffle && history.len() >= 2 {
                     history.pop();
                     start = history.pop().map(|p| (p, 0.0));
+                } else {
+                    start = Some(((c + len - 1) % len, 0.0));
                 }
             }
-            (Some(Cmd::Pause), Some(c)) if paused => start = Some((c, from)),
-            (Some(Cmd::Pause), Some(_)) => {
-                silence();
-                (from, paused) = (pos, true);
+            (Some(Cmd::Pause), Some(c)) if deck.paused => {
+                if deck.file {
+                    // "play" carries on from where it stopped, after a pause or a seek.
+                    deck.paused = mci("play claudesona").is_err();
+                } else {
+                    start = Some((c, deck.from));
+                }
             }
-            (Some(Cmd::Seek(s)), Some(c)) if !paused => start = Some((c, s)),
-            (Some(Cmd::Seek(s)), Some(_)) => from = s.clamp(0.0, len),
+            (Some(Cmd::Pause), Some(_)) => {
+                if deck.file {
+                    let _ = mci("pause claudesona");
+                } else {
+                    deck.from = deck.pos();
+                    use windows_sys::Win32::Media::Audio::PlaySoundW;
+                    unsafe { PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0) };
+                }
+                deck.paused = true;
+            }
+            (Some(Cmd::Seek(s)), Some(c)) => {
+                let s = s.clamp(0.0, deck.len);
+                if deck.file {
+                    let _ = mci(&format!("{} claudesona {} {}", if deck.paused { "seek" } else { "play" }, if deck.paused { "to" } else { "from" }, (s * 1000.0) as u32));
+                } else if deck.paused {
+                    deck.from = s;
+                } else {
+                    start = Some((c, s));
+                }
+            }
             (Some(Cmd::Stop), _) => {
-                silence(); // before the buffer is freed
-                (cur, pcm, _playing, paused) = (None, vec![], vec![], false);
+                deck.silence();
+                (deck.synth, deck._playing, deck.paused, cur) = (None, vec![], false, None);
                 history.clear();
             }
-            (None, Some(_)) if !paused && pos >= len => start = Some((pick(&mut rng, cur), 0.0)),
+            (Some(Cmd::SetMode(m)), _) => mode = m,
+            (Some(Cmd::Select(name)), None) => list = lists.iter().position(|l| l.name == name).unwrap_or(0),
+            (Some(Cmd::Rescan), _) => {
+                let was_playing = cur.is_some();
+                refresh(&mut lists, &mut list, &mut cur);
+                if was_playing && cur.is_none() {
+                    deck.silence(); // its file or folder is gone
+                }
+                history.clear();
+            }
+            (None, Some(c)) if deck.ended() => start = Some((after(mode, c, len, false, &mut rng), 0.0)),
             _ => {}
         }
-        if let Some((t, at)) = start {
-            silence(); // Windows stops reading the old buffer before we replace it
-            if cur != Some(t) {
-                seed = seed.wrapping_mul(747_796_405).wrapping_add(rng.0);
-                pcm = render(&TRACKS[t], seed);
-                history.push(t);
+        // Start the chosen song; if a file won't play, try the next ones (each at most once).
+        // If nothing in the playlist plays, fall back to her own songs rather than going silent.
+        if let Some((mut s, at)) = start {
+            seed = seed.wrapping_mul(747_796_405).wrapping_add(rng.0);
+            let mut tries = 0;
+            while deck.start(&lists[list].songs[s], at, seed).is_err() {
+                tries += 1;
+                let len = lists[list].songs.len();
+                if tries < len {
+                    s = after(if mode == Mode::LoopOne { Mode::Loop } else { mode }, s, len, true, &mut rng);
+                } else {
+                    // Built-in songs always play, so this ends.
+                    (list, tries, cur) = (0, 0, None);
+                    history.clear();
+                    s = first(mode, lists[0].songs.len(), &mut rng);
+                }
             }
-            cur = Some(t);
-            let skip = ((at.max(0.0) * RATE as f32) as usize).min(pcm.len());
-            _playing = wav(&pcm[skip..]);
-            // Async: a blocking PlaySound can't be stopped from another call.
-            unsafe { PlaySoundW(_playing.as_ptr() as *const u16, std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
-            (from, since, paused) = (skip as f32 / RATE as f32, Instant::now(), false);
+            if cur != Some(s) {
+                history.push(s);
+            }
+            cur = Some(s);
         }
-        let len = pcm.len() as f32 / RATE as f32;
-        let pos = if paused { from } else { from + since.elapsed().as_secs_f32() };
-        *STATUS.lock().unwrap() = cur.map(|track| Status { track, pos: pos.min(len), len, paused });
+        *STATUS.lock().unwrap() = cur.map(|track| Status {
+            playlist: list,
+            track,
+            name: lists[list].songs[track].title(),
+            pos: deck.pos().min(deck.len),
+            len: deck.len,
+            paused: deck.paused,
+        });
     }
-}
-
-/// A random track, never `cur` again.
-fn pick(rng: &mut Rng, cur: Option<usize>) -> usize {
-    let i = (rng.next() * TRACKS.len() as f32) as usize % TRACKS.len();
-    if Some(i) == cur { (i + 1) % TRACKS.len() } else { i }
 }
 
 struct Rng(u32);
@@ -355,16 +618,16 @@ fn piano(buf: &mut [f32], start: f32, midi: f32, secs: f32, vol: f32) {
     });
 }
 
-/// Hum: a voice-like "ooh" that scoops up into the note, then sways with vibrato.
-fn hum(buf: &mut [f32], start: f32, midi: f32, secs: f32, vol: f32) {
+/// Dusty keys: a mellow electric piano with a slow tape wobble in pitch, the classic lofi sound.
+fn dusty_keys(buf: &mut [f32], start: f32, midi: f32, secs: f32, vol: f32) {
     let f = freq(midi);
     let mut phase = 0.0;
+    let wow = start * 0.55; // the wobble keeps running across notes, like one tape
     add(buf, start, secs, |t| {
-        let scoop = 1.0 - 0.02 * (-t * 25.0).exp(); // starts a little flat, like a singer settling on the pitch
-        let vib = 1.0 + 0.005 * (TAU * 5.2 * t).sin() * ((t - 0.2) / 0.3).clamp(0.0, 1.0);
-        phase += TAU * f * scoop * vib / RATE as f32;
-        let env = (t / 0.07).min(1.0) * ((secs - t) / 0.2).clamp(0.0, 1.0);
-        vol * 0.85 * env * (phase.sin() + 0.3 * (2.0 * phase).sin() + 0.15 * (3.0 * phase).sin() + 0.05 * (4.0 * phase).sin())
+        phase += TAU * f * (1.0 + 0.003 * (TAU * 0.55 * (t + wow)).sin()) / RATE as f32;
+        let env = (t / 0.01).min(1.0) * (-t * 1.1).exp() * (1.0 - (t / secs).powi(8));
+        let tone = phase.sin() + 0.15 * (2.0 * phase).sin() * (-t * 3.0).exp();
+        vol * 1.05 * env * tone * (1.0 + 0.1 * (TAU * 4.0 * t).sin())
     });
 }
 
@@ -374,7 +637,7 @@ fn note(buf: &mut [f32], inst: Inst, start: f32, midi: f32, secs: f32, vol: f32)
         Inst::Keys => keys(buf, start, midi, secs, vol),
         Inst::MusicBox => music_box(buf, start, midi, secs, vol),
         Inst::Flute => flute(buf, start, midi, secs, vol),
-        Inst::Hum => hum(buf, start, midi, secs, vol),
+        Inst::DustyKeys => dusty_keys(buf, start, midi, secs, vol),
         Inst::Pad => pad(buf, start, midi, secs, vol),
         Inst::Vibes => vibes(buf, start, midi, secs, vol * 0.8),
         Inst::Piano | Inst::PianoArp => piano(buf, start, midi, secs, vol),
@@ -396,7 +659,7 @@ fn chord_bar(buf: &mut [f32], inst: Inst, t0: f32, beat: f32, chord: &[f32], rng
                 pad(buf, t0, *n, bar + 0.3, 0.02);
             }
         }
-        Inst::Keys | Inst::Vibes | Inst::Piano | Inst::MusicBox | Inst::Flute | Inst::Hum => {
+        Inst::Keys | Inst::Vibes | Inst::Piano | Inst::MusicBox | Inst::Flute | Inst::DustyKeys => {
             for (i, n) in chord.iter().enumerate() {
                 note(buf, inst, t0 + i as f32 * 0.018, *n, bar, 0.07); // slight strum
                 if rng.next() < 0.5 {
@@ -436,6 +699,9 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
     let beat = 60.0 / track.bpm;
     let bar = beat * 4.0;
     let mut buf = vec![0.0f32; (bar * BARS as f32 * RATE as f32) as usize];
+    let mut kicks = vec![0.0f32; if track.lofi { buf.len() } else { 0 }];
+    let mut kick_times = vec![];
+    let swing_amt = if track.lofi { 0.17 } else { 0.1 }; // lofi drags the off-beats further
     let mut rng = Rng(seed | 1);
     let breakdown = 2 + (rng.next() * 2.0) as usize % 2; // a drumless section in the middle
     let mut last_bass = 0.0;
@@ -473,13 +739,14 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
             last_bass = root;
             if section >= 1 && sing {
                 for &(at, n, beats) in track.tune[b % track.tune.len()] {
-                    note(&mut buf, track.lead, t0 + at * beat, n + track.transpose, beats * beat * 1.15, 0.075);
+                    let vol = if track.lofi { 0.055 } else { 0.075 }; // lofi keeps the melody back in the mix
+                    note(&mut buf, track.lead, t0 + at * beat, n + track.transpose, beats * beat * 1.15, vol);
                 }
             } else if section >= 1 {
                 for step in 0..8 {
                     if rng.next() < track.melody {
                         let n = chord[(rng.next() * chord.len() as f32) as usize % chord.len()] + 12.0;
-                        let swing = if step % 2 == 1 { beat * 0.1 } else { 0.0 };
+                        let swing = if step % 2 == 1 { beat * swing_amt } else { 0.0 };
                         let len = if track.groove == Groove::Ballad { beat * 3.0 } else { beat * 1.5 }; // ballads sing long notes
                         note(&mut buf, track.lead, t0 + step as f32 * beat / 2.0 + swing, n, len, 0.05);
                     }
@@ -492,7 +759,12 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
                 Groove::BoomBap => {
                     for k in [0.0, 2.0, 2.5] {
                         if k != 2.5 || rng.next() < 0.4 {
-                            kick(&mut buf, t0 + k * beat, 0.45);
+                            if track.lofi {
+                                kick(&mut kicks, t0 + k * beat, 0.5);
+                                kick_times.push(t0 + k * beat);
+                            } else {
+                                kick(&mut buf, t0 + k * beat, 0.45);
+                            }
                         }
                     }
                     for s in [1.0, 3.0] {
@@ -500,7 +772,7 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
                         add(&mut buf, t0 + s * beat, 0.1, |t| 0.06 * (-t * 30.0).exp() * (TAU * 185.0 * t).sin());
                     }
                     for h in 0..8 {
-                        let swing = if h % 2 == 1 { beat * 0.1 } else { 0.0 };
+                        let swing = if h % 2 == 1 { beat * swing_amt } else { 0.0 };
                         let vol = 0.022 + 0.015 * rng.next();
                         noise_hit(&mut buf, t0 + h as f32 * beat / 2.0 + swing, 0.06, 70.0, 0.5, true, vol, rng.0);
                     }
@@ -546,6 +818,18 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
         }
     }
     // A warm low-pass, gentle saturation, and short fades at both ends. (No vinyl crackle: it sounded like frying.)
+    // Lofi "pump": everything else dips under each kick and swells back.
+    if track.lofi {
+        for &k in &kick_times {
+            let s0 = (k * RATE as f32) as usize;
+            for (i, x) in buf.iter_mut().skip(s0).take(RATE / 3).enumerate() {
+                *x *= 1.0 - 0.35 * (-(i as f32 / RATE as f32) / 0.09).exp();
+            }
+        }
+        for (x, k) in buf.iter_mut().zip(&kicks) {
+            *x += k;
+        }
+    }
     let mut lp = 0.0f32;
     let len = buf.len() as f32;
     for (i, s) in buf.iter_mut().enumerate() {
@@ -594,6 +878,37 @@ mod tests {
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(bytes.len(), 44 + 20);
     }
+
+    #[test]
+    fn folders_become_playlists() {
+        let dir = std::env::temp_dir().join(format!("claudesona-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for f in ["b.mp3", "a.wav", "notes.txt", "Chill/2.flac", "Chill/1.M4A", "Empty/readme.md"] {
+            std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let lists = scan(&dir);
+        let names: Vec<_> = lists.iter().map(|l| (l.name.as_str(), l.songs.iter().map(Song::title).collect::<Vec<_>>())).collect();
+        assert_eq!(names[0].0, BUILT_IN);
+        assert_eq!(names[0].1.len(), TRACKS.len());
+        assert_eq!(names[1], (LOOSE, vec!["a".to_string(), "b".to_string()]));
+        assert_eq!(names[2], ("Chill", vec!["1".to_string(), "2".to_string()]));
+        assert_eq!(names.len(), 3); // no playlist for a folder without audio
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modes_pick_the_next_song() {
+        let mut rng = Rng(7);
+        assert_eq!(after(Mode::Loop, 2, 3, false, &mut rng), 0);
+        assert_eq!(after(Mode::LoopOne, 1, 3, false, &mut rng), 1);
+        assert_eq!(after(Mode::LoopOne, 1, 3, true, &mut rng), 2); // Next still moves on
+        for _ in 0..20 {
+            assert_ne!(after(Mode::Shuffle, 1, 3, false, &mut rng), 1);
+        }
+        assert_eq!(after(Mode::Shuffle, 0, 1, false, &mut rng), 0); // a one-song playlist just repeats
+        assert_eq!(Mode::from_label(Mode::LoopOne.label()), Some(Mode::LoopOne));
+    }
 }
 
 
@@ -601,7 +916,7 @@ mod tests {
 #[test]
 #[ignore]
 fn player_plays_pauses_and_stops() {
-    play_track(2);
+    play_track(0, 2);
     std::thread::sleep(Duration::from_secs(2));
     let st = status().expect("playing");
     assert!(st.track == 2 && st.pos > 0.5 && !st.paused, "pos {}", st.pos);
@@ -617,4 +932,33 @@ fn player_plays_pauses_and_stops() {
     stop();
     std::thread::sleep(Duration::from_millis(300));
     assert!(status().is_none());
+}
+
+// Plays a real file through MCI for a few seconds: run with `cargo test --release -- --ignored`.
+#[test]
+#[ignore]
+fn deck_plays_a_file_with_pause_and_seek() {
+    let dir = std::env::temp_dir().join(format!("claudesona-mci-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tone song.wav"); // a space, like real file names
+    let tone: Vec<f32> = (0..RATE * 6).map(|i| 0.1 * (TAU * 440.0 * i as f32 / RATE as f32).sin()).collect();
+    std::fs::write(&path, wav(&tone)).unwrap();
+    let mut deck = Deck { synth: None, _playing: vec![], file: false, len: 0.0, from: 0.0, since: Instant::now(), paused: false };
+    deck.start(&Song::File(path.clone()), 0.0, 1).expect("MCI plays the WAV");
+    assert!((deck.len - 6.0).abs() < 0.1, "len {}", deck.len);
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(deck.pos() > 0.8 && !deck.ended(), "pos {}", deck.pos());
+    mci("pause claudesona").unwrap();
+    deck.paused = true;
+    let held = deck.pos();
+    std::thread::sleep(Duration::from_millis(400));
+    assert!((deck.pos() - held).abs() < 0.05);
+    mci("seek claudesona to 5500").unwrap();
+    mci("play claudesona").unwrap();
+    deck.paused = false;
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(deck.ended(), "should have reached the end, pos {}", deck.pos());
+    deck.silence();
+    assert!(deck.start(&Song::File(dir.join("missing.mp3")), 0.0, 1).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }
