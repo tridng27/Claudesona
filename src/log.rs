@@ -1,0 +1,191 @@
+// Everything that knows Claude Code's session-log format lives here. The format is internal and unversioned.
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::time::Duration;
+
+#[derive(Debug, PartialEq)]
+pub enum Event {
+    Prompt,                                   // you sent a message: she starts working
+    Tool(String),                             // short activity label
+    Note(String),                             // Claude's text between tool calls, cleaned and short
+    Reply(String),                            // Claude's final text of the turn, raw (goes to the rewriter)
+    TurnEnd,                                  // the turn is over
+    AgentStart { id: String, label: String }, // a sub-agent was spawned
+    AgentDone(String),                        // a tool call finished (minis match it by id)
+}
+
+pub fn parse_line(line: &str) -> Vec<Event> {
+    let Ok(d) = serde_json::from_str::<Value>(line) else { return vec![] };
+    if d["isMeta"] == true || d["isSidechain"] == true {
+        return vec![];
+    }
+    let content = &d["message"]["content"];
+    match d["type"].as_str() {
+        Some("user") => {
+            // Tool results also come back as "user" lines; commands and caveats are wrapped in <tags>.
+            let typed = content.as_str().is_some_and(|s| !s.trim_start().starts_with('<'));
+            let blocks = content.as_array().into_iter().flatten();
+            let has_text = blocks.clone().any(|b| b["type"] == "text");
+            let mut events: Vec<Event> = blocks
+                .filter(|b| b["type"] == "tool_result")
+                .filter_map(|b| Some(Event::AgentDone(b["tool_use_id"].as_str()?.to_string())))
+                .collect();
+            if typed || has_text {
+                events.insert(0, Event::Prompt);
+            }
+            events
+        }
+        Some("assistant") => {
+            // Text followed by more tool calls is a side note; anything else is the final reply.
+            let interim = d["message"]["stop_reason"] == "tool_use";
+            content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|b| match b["type"].as_str() {
+                    Some("text") => {
+                        let text = b["text"].as_str().unwrap_or("").trim();
+                        if clean(text, 1).is_empty() {
+                            vec![]
+                        } else if interim {
+                            vec![Event::Note(clean(text, 80))]
+                        } else {
+                            vec![Event::Reply(text.to_string())]
+                        }
+                    }
+                    Some("tool_use") => {
+                        let name = b["name"].as_str().unwrap_or("");
+                        let mut v = vec![Event::Tool(tool_label(name, &b["input"]))];
+                        if matches!(name, "Agent" | "Task") {
+                            let label = b["input"]["description"].as_str().unwrap_or("helper");
+                            v.push(Event::AgentStart { id: b["id"].as_str().unwrap_or("").to_string(), label: clean(label, 18) });
+                        }
+                        v
+                    }
+                    _ => vec![],
+                })
+                .collect()
+        }
+        Some("system") if d["subtype"] == "turn_duration" => vec![Event::TurnEnd],
+        _ => vec![],
+    }
+}
+
+fn tool_label(name: &str, input: &Value) -> String {
+    let file = input["file_path"].as_str().map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string());
+    match (name, file) {
+        ("Read", Some(f)) => format!("Reading {f}…"),
+        ("Edit" | "Write", Some(f)) => format!("Editing {f}…"),
+        ("Bash" | "PowerShell", _) => "Running a command…".into(),
+        ("Grep" | "Glob", _) => "Searching…".into(),
+        ("Agent" | "Task", _) => "Sending a helper…".into(),
+        ("WebSearch" | "WebFetch", _) => "Looking it up online…".into(),
+        _ => format!("Using {name}…"),
+    }
+}
+
+/// Bubble-friendly text: no code blocks or markdown symbols, one paragraph, at most `max` chars.
+pub fn clean(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut in_code = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let line = line.trim().trim_start_matches(['#', '-', '*', '>', '|', ' ']);
+        if !line.is_empty() {
+            out.push_str(line);
+            out.push(' ');
+        }
+    }
+    let out: String = out.replace(['*', '`'], "").split_whitespace().collect::<Vec<_>>().join(" ");
+    if out.chars().count() > max { out.chars().take(max).collect::<String>() + "…" } else { out }
+}
+
+/// Polls every session log for new lines and sends events. History from before startup isn't replayed.
+pub fn watch(emit: impl Fn(&PathBuf, Event)) {
+    // shortcut: scans ~/.claude/projects on this PC only; switch to hook-registered sessions (SPEC.md) for WSL.
+    let root = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude").join("projects");
+    // Read position per file: logs that exist at startup are skipped to their end; new ones are read from the start.
+    let mut positions: HashMap<PathBuf, u64> = logs(&root).into_iter().map(|p| (p.clone(), len(&p))).collect();
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        for path in logs(&root) {
+            let pos = positions.entry(path.clone()).or_insert(0);
+            if len(&path) <= *pos {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            let Ok(mut f) = File::open(&path) else { continue };
+            if f.seek(SeekFrom::Start(*pos)).is_err() || f.read_to_end(&mut bytes).is_err() {
+                continue;
+            }
+            // Only consume whole lines; a half-written last line is read again next round.
+            let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { continue };
+            *pos += end as u64 + 1;
+            for ev in String::from_utf8_lossy(&bytes[..end]).lines().flat_map(parse_line) {
+                emit(&path, ev);
+            }
+        }
+    }
+}
+
+fn len(p: &PathBuf) -> u64 {
+    std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Every session log file.
+fn logs(root: &PathBuf) -> Vec<PathBuf> {
+    let Ok(dirs) = std::fs::read_dir(root) else { return vec![] };
+    dirs.flatten()
+        .filter_map(|d| std::fs::read_dir(d.path()).ok())
+        .flat_map(|r| r.flatten())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_line_shapes() {
+        let prompt = r#"{"type":"user","isSidechain":false,"message":{"role":"user","content":"Try to speak something"}}"#;
+        let image_prompt = r#"{"type":"user","message":{"content":[{"type":"text","text":"[Image #2] look"},{"type":"image","source":{}}]}}"#;
+        let meta = r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>x"}}"#;
+        let command = r#"{"type":"user","message":{"content":"<command-name>/clear</command-name>"}}"#;
+        let result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
+        let tool = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"C:\\Claudesona\\src\\main.rs"}}]}}"#;
+        let text = r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Done! **Bold** and `code`."}]}}"#;
+        let note = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Checking **files**."}]}}"#;
+        let agent = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"a1","name":"Agent","input":{"description":"Find auth code"}}]}}"#;
+        let agent_result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a1","content":"found"}]}}"#;
+        let turn_end = r#"{"type":"system","subtype":"turn_duration","durationMs":1200}"#;
+        let thinking = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]}}"#;
+        assert_eq!(parse_line(prompt), vec![Event::Prompt]);
+        assert_eq!(parse_line(image_prompt), vec![Event::Prompt]);
+        assert!(parse_line(meta).is_empty() && parse_line(command).is_empty());
+        assert_eq!(parse_line(result), vec![Event::AgentDone("t1".into())]);
+        assert_eq!(parse_line(tool), vec![Event::Tool("Reading main.rs…".into())]);
+        assert_eq!(parse_line(text), vec![Event::Reply("Done! **Bold** and `code`.".into())]);
+        assert_eq!(parse_line(note), vec![Event::Note("Checking files.".into())]);
+        assert_eq!(parse_line(agent), vec![Event::Tool("Sending a helper…".into()), Event::AgentStart { id: "a1".into(), label: "Find auth code".into() }]);
+        assert_eq!(parse_line(agent_result), vec![Event::AgentDone("a1".into())]);
+        assert_eq!(parse_line(turn_end), vec![Event::TurnEnd]);
+        assert!(parse_line(thinking).is_empty() && parse_line("not json").is_empty());
+    }
+
+    #[test]
+    fn clean_drops_code_and_caps_length() {
+        assert_eq!(clean("Hi\n```rust\nfn x() {}\n```\n- one\n## Two", 160), "Hi one Two");
+        assert!(clean(&"word ".repeat(100), 160).ends_with('…'));
+    }
+}
