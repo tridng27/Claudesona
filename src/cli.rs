@@ -29,7 +29,34 @@ pub fn hook() {
     }
 }
 
+/// The user's home folder (where `.claude` lives).
+pub fn home() -> PathBuf {
+    PathBuf::from(std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default())
+}
+
+/// Where `install` puts her. `skin` and `music` folders go next to the exe.
+fn install_dir() -> Result<PathBuf, String> {
+    if cfg!(windows) {
+        let local = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA isn't set")?;
+        Ok(PathBuf::from(local).join("Programs").join("Claudesona"))
+    } else if cfg!(target_os = "macos") {
+        Ok(home().join("Library").join("Application Support").join("Claudesona"))
+    } else {
+        Ok(home().join(".local").join("share").join("claudesona"))
+    }
+}
+
+/// Starts the app detached from the hook (its own process group, no shared pipes), so it outlives the hook
+/// and Claude Code doesn't wait on it.
+#[cfg(not(windows))]
+fn launch(exe: &PathBuf) {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let _ = Command::new(exe).process_group(0).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+}
+
 /// Starts the app fully detached, so it outlives the hook process.
+#[cfg(windows)]
 fn launch(exe: &PathBuf) {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
@@ -51,8 +78,11 @@ fn launch(exe: &PathBuf) {
 }
 
 fn settings_path() -> Result<PathBuf, String> {
-    let home = std::env::var("USERPROFILE").map_err(|_| "USERPROFILE isn't set")?;
-    Ok(PathBuf::from(home).join(".claude").join("settings.json"))
+    let home = home();
+    if home.as_os_str().is_empty() {
+        return Err("Couldn't find your home folder.".into());
+    }
+    Ok(home.join(".claude").join("settings.json"))
 }
 
 /// Removes our hook entries, then adds them back for `cmd` (if given). Other settings are untouched.
@@ -103,11 +133,10 @@ fn update_settings(cmd: Option<&str>) -> Result<(), String> {
     std::fs::write(&path, text + "\n").map_err(|e| e.to_string())
 }
 
-/// Copies this exe to %LOCALAPPDATA%\Programs\Claudesona, adds the hooks and starts her.
+/// Copies this exe to the install folder, adds the hooks and starts her.
 pub fn install() -> Result<String, String> {
-    let local = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA isn't set")?;
-    let dir = PathBuf::from(local).join("Programs").join("Claudesona");
-    let target = dir.join("claudesona.exe");
+    let dir = install_dir()?;
+    let target = dir.join(if cfg!(windows) { "claudesona.exe" } else { "claudesona" });
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     if me != target {
         let _ = send(r#"{"quit":true}"#); // an older copy may be running and holding the file
@@ -127,10 +156,23 @@ pub fn install() -> Result<String, String> {
 pub fn uninstall() -> Result<String, String> {
     update_settings(None)?;
     let _ = send(r#"{"quit":true}"#);
-    Ok("Claudesona's hooks are removed and she's closed.\nYou can delete %LOCALAPPDATA%\\Programs\\Claudesona.".into())
+    Ok(format!("Claudesona's hooks are removed and she's closed.\nYou can delete {}.", install_dir()?.display()))
 }
 
-/// The app has no console, so results are shown in a message box.
+/// macOS and Linux: install and uninstall run in a terminal, so results go there.
+#[cfg(not(windows))]
+pub fn report(result: Result<String, String>) {
+    match result {
+        Ok(t) => println!("{t}"),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The Windows exe has no console, so results are shown in a message box.
+#[cfg(windows)]
 pub fn report(result: Result<String, String>) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_ICONINFORMATION, MessageBoxW};
     let (text, icon) = match result {

@@ -1,10 +1,10 @@
 // Lofi music she plays for you. It's synthesized here (no audio files, no network), so it's royalty-free by construction.
-// A player thread renders a track and plays it with Windows' PlaySound; the app drives it with play/pause/next/seek.
+// A player thread renders a track and plays it through rodio; the app drives it with play/pause/next/seek.
 use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const RATE: usize = 22_050;
 const BARS: usize = 32; // 1:30 to 2:00 per track
@@ -181,7 +181,7 @@ struct Playlist {
 
 pub const BUILT_IN: &str = "Claudesona's songs";
 pub const LOOSE: &str = "My music"; // files directly in the music folder
-const AUDIO: [&str; 6] = ["mp3", "wav", "wma", "m4a", "aac", "flac"];
+const AUDIO: [&str; 6] = ["mp3", "wav", "m4a", "aac", "flac", "ogg"];
 
 /// `music` next to the exe, like `skin`. Each subfolder with audio files is a playlist.
 pub fn music_dir() -> PathBuf {
@@ -250,7 +250,7 @@ static STATUS: Mutex<Option<Status>> = Mutex::new(None);
 static LIBRARY: Mutex<Vec<(String, Vec<String>)>> = Mutex::new(vec![]); // playlist names and song titles, for the UI
 static PLAYER: OnceLock<Sender<Cmd>> = OnceLock::new();
 
-/// Commands go to one player thread, which owns the sound and makes every PlaySound and MCI call.
+/// Commands go to one player thread, which owns the sound device and the playing song.
 fn send(cmd: Cmd) {
     let _ = PLAYER
         .get_or_init(|| {
@@ -322,83 +322,82 @@ fn first(mode: Mode, len: usize, rng: &mut Rng) -> usize {
     if mode == Mode::Shuffle { (rng.next() * len as f32) as usize % len.max(1) } else { 0 }
 }
 
-/// Sends an MCI command string (Windows' media player engine plays the user's files). Err on failure.
-fn mci(cmd: &str) -> Result<String, u32> {
-    use windows_sys::Win32::Media::Multimedia::mciSendStringW;
-    let wide: Vec<u16> = cmd.encode_utf16().chain([0]).collect();
-    let mut out = [0u16; 128];
-    let err = unsafe { mciSendStringW(wide.as_ptr(), out.as_mut_ptr(), out.len() as u32, std::ptr::null_mut()) };
-    let end = out.iter().position(|c| *c == 0).unwrap_or(out.len());
-    if err == 0 { Ok(String::from_utf16_lossy(&out[..end])) } else { Err(err) }
-}
-
-/// One song at a time: a synthesized track through PlaySound, or a file through MCI.
+/// One song at a time through rodio (the same on Windows, macOS and Linux): a synthesized track or a file.
 struct Deck {
-    synth: Option<(usize, Vec<f32>)>, // rendered built-in track, kept so pause/seek/Loop 1 don't re-render
-    _playing: Vec<u8>,                // WAV bytes Windows is reading; must outlive playback
-    file: bool,                       // an MCI file is open as "claudesona"
-    len: f32,
-    from: f32, // synth: where the playing buffer starts
-    since: Instant,
+    out: Option<rodio::MixerDeviceSink>, // the sound device, opened on first play and kept
+    player: Option<rodio::Player>,
+    synth: Option<(usize, Vec<f32>)>, // rendered built-in track, kept so Loop 1 and seeking don't re-render
+    len: f32,                         // seconds; 0 when a file doesn't say
     paused: bool,
 }
 
 impl Deck {
     fn silence(&mut self) {
-        use windows_sys::Win32::Media::Audio::PlaySoundW;
-        unsafe { PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0) };
-        if self.file {
-            let _ = mci("close claudesona");
-            self.file = false;
+        if let Some(p) = self.player.take() {
+            p.stop();
         }
     }
 
-    /// Starts `song` `at` seconds in. Err if the file can't be played (unsupported format, missing).
+    /// Starts `song` `at` seconds in. Err if there's no sound device or the file can't be read or decoded.
     fn start(&mut self, song: &Song, at: f32, seed: u32) -> Result<(), ()> {
-        self.silence(); // Windows stops reading the old buffer before it's replaced
+        use rodio::Source;
+        self.silence();
         self.paused = false;
+        if self.out.is_none() {
+            let mut out = rodio::DeviceSinkBuilder::open_default_sink().map_err(|_| ())?;
+            out.log_on_drop(false);
+            self.out = Some(out);
+        }
+        let player = rodio::Player::connect_new(self.out.as_ref().unwrap().mixer());
         match song {
             Song::Synth(t) => {
                 if self.synth.as_ref().is_none_or(|(i, _)| i != t) {
                     self.synth = Some((*t, render(&TRACKS[*t], seed)));
                 }
                 let pcm = &self.synth.as_ref().unwrap().1;
-                let skip = ((at.max(0.0) * RATE as f32) as usize).min(pcm.len());
                 self.len = pcm.len() as f32 / RATE as f32;
-                self._playing = wav(&pcm[skip..]);
-                use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
-                // Async: a blocking PlaySound can't be stopped from another call.
-                unsafe { PlaySoundW(self._playing.as_ptr() as *const u16, std::ptr::null_mut(), SND_MEMORY | SND_ASYNC | SND_NODEFAULT) };
-                (self.from, self.since) = (skip as f32 / RATE as f32, Instant::now());
-                Ok(())
+                let (mono, rate) = (std::num::NonZero::new(1).unwrap(), std::num::NonZero::new(RATE as u32).unwrap());
+                player.append(rodio::buffer::SamplesBuffer::new(mono, rate, pcm.clone()));
             }
             Song::File(p) => {
-                mci(&format!("open \"{}\" type mpegvideo alias claudesona", p.display())).map_err(|_| ())?;
-                self.file = true;
-                let ok = mci("set claudesona time format milliseconds").is_ok()
-                    && mci(&format!("play claudesona from {}", (at.max(0.0) * 1000.0) as u32)).is_ok();
-                self.len = mci("status claudesona length").ok().and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0) / 1000.0;
-                if !ok || self.len <= 0.0 {
-                    self.silence();
-                    return Err(());
-                }
-                Ok(())
+                let decoder = rodio::Decoder::try_from(std::fs::File::open(p).map_err(|_| ())?).map_err(|_| ())?;
+                self.len = decoder.total_duration().map_or(0.0, |d| d.as_secs_f32());
+                player.append(decoder);
             }
         }
+        if at > 0.0 {
+            let _ = player.try_seek(Duration::from_secs_f32(at));
+        }
+        self.player = Some(player);
+        Ok(())
     }
 
     fn pos(&self) -> f32 {
-        if self.file {
-            mci("status claudesona position").ok().and_then(|s| s.trim().parse::<f32>().ok()).unwrap_or(0.0) / 1000.0
-        } else if self.paused {
-            self.from
-        } else {
-            self.from + self.since.elapsed().as_secs_f32()
-        }
+        self.player.as_ref().map_or(0.0, |p| p.get_pos().as_secs_f32())
     }
 
     fn ended(&self) -> bool {
-        !self.paused && (self.synth.is_some() || self.file) && if self.file { mci("status claudesona mode").is_ok_and(|m| m.trim() == "stopped") } else { self.pos() >= self.len }
+        !self.paused && self.player.as_ref().is_some_and(|p| p.empty())
+    }
+
+    fn pause(&mut self) {
+        if let Some(p) = &self.player {
+            p.pause();
+            self.paused = true;
+        }
+    }
+
+    fn resume(&mut self) {
+        if let Some(p) = &self.player {
+            p.play();
+            self.paused = false;
+        }
+    }
+
+    fn seek(&mut self, secs: f32) {
+        if let Some(p) = &self.player {
+            let _ = p.try_seek(Duration::from_secs_f32(secs.max(0.0)));
+        }
     }
 }
 
@@ -408,7 +407,7 @@ fn player(rx: Receiver<Cmd>) {
     let mut seed = 1u32;
     let mut lists = scan(&music_dir());
     publish(&lists);
-    let mut deck = Deck { synth: None, _playing: vec![], file: false, len: 0.0, from: 0.0, since: Instant::now(), paused: false };
+    let mut deck = Deck { out: None, player: None, synth: None, len: 0.0, paused: false };
     let (mut list, mut cur, mut mode) = (0usize, None::<usize>, Mode::Shuffle);
     let mut history: Vec<usize> = vec![]; // for Prev in shuffle
     loop {
@@ -445,37 +444,12 @@ fn player(rx: Receiver<Cmd>) {
                     start = Some(((c + len - 1) % len, 0.0));
                 }
             }
-            (Some(Cmd::Pause), Some(c)) if deck.paused => {
-                if deck.file {
-                    // "play" carries on from where it stopped, after a pause or a seek.
-                    deck.paused = mci("play claudesona").is_err();
-                } else {
-                    start = Some((c, deck.from));
-                }
-            }
-            (Some(Cmd::Pause), Some(_)) => {
-                if deck.file {
-                    let _ = mci("pause claudesona");
-                } else {
-                    deck.from = deck.pos();
-                    use windows_sys::Win32::Media::Audio::PlaySoundW;
-                    unsafe { PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0) };
-                }
-                deck.paused = true;
-            }
-            (Some(Cmd::Seek(s)), Some(c)) => {
-                let s = s.clamp(0.0, deck.len);
-                if deck.file {
-                    let _ = mci(&format!("{} claudesona {} {}", if deck.paused { "seek" } else { "play" }, if deck.paused { "to" } else { "from" }, (s * 1000.0) as u32));
-                } else if deck.paused {
-                    deck.from = s;
-                } else {
-                    start = Some((c, s));
-                }
-            }
+            (Some(Cmd::Pause), Some(_)) if deck.paused => deck.resume(),
+            (Some(Cmd::Pause), Some(_)) => deck.pause(),
+            (Some(Cmd::Seek(s)), Some(_)) => deck.seek(if deck.len > 0.0 { s.min(deck.len) } else { s }),
             (Some(Cmd::Stop), _) => {
                 deck.silence();
-                (deck.synth, deck._playing, deck.paused, cur) = (None, vec![], false, None);
+                (deck.synth, deck.paused, cur) = (None, false, None);
                 history.clear();
             }
             (Some(Cmd::SetMode(m)), _) => mode = m,
@@ -496,28 +470,35 @@ fn player(rx: Receiver<Cmd>) {
         if let Some((mut s, at)) = start {
             seed = seed.wrapping_mul(747_796_405).wrapping_add(rng.0);
             let mut tries = 0;
+            let mut playing = true;
             while deck.start(&lists[list].songs[s], at, seed).is_err() {
                 tries += 1;
                 let len = lists[list].songs.len();
                 if tries < len {
                     s = after(if mode == Mode::LoopOne { Mode::Loop } else { mode }, s, len, true, &mut rng);
-                } else {
-                    // Built-in songs always play, so this ends.
+                } else if list != 0 {
                     (list, tries, cur) = (0, 0, None);
                     history.clear();
                     s = first(mode, lists[0].songs.len(), &mut rng);
+                } else {
+                    playing = false; // even built-in songs fail: there's no sound device
+                    break;
                 }
             }
-            if cur != Some(s) {
-                history.push(s);
+            if !playing {
+                cur = None;
+            } else {
+                if cur != Some(s) {
+                    history.push(s);
+                }
+                cur = Some(s);
             }
-            cur = Some(s);
         }
         *STATUS.lock().unwrap() = cur.map(|track| Status {
             playlist: list,
             track,
             name: lists[list].songs[track].title(),
-            pos: deck.pos().min(deck.len),
+            pos: if deck.len > 0.0 { deck.pos().min(deck.len) } else { deck.pos() },
             len: deck.len,
             paused: deck.paused,
         });
@@ -840,7 +821,8 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
     buf
 }
 
-/// 16-bit mono PCM WAV file bytes.
+/// 16-bit mono PCM WAV file bytes (tests write real files with it).
+#[cfg(test)]
 fn wav(samples: &[f32]) -> Vec<u8> {
     let data = (samples.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + data as usize);
@@ -934,28 +916,26 @@ fn player_plays_pauses_and_stops() {
     assert!(status().is_none());
 }
 
-// Plays a real file through MCI for a few seconds: run with `cargo test --release -- --ignored`.
+// Plays a real file for a few seconds: run with `cargo test --release -- --ignored`.
 #[test]
 #[ignore]
 fn deck_plays_a_file_with_pause_and_seek() {
-    let dir = std::env::temp_dir().join(format!("claudesona-mci-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("claudesona-file-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("tone song.wav"); // a space, like real file names
     let tone: Vec<f32> = (0..RATE * 6).map(|i| 0.1 * (TAU * 440.0 * i as f32 / RATE as f32).sin()).collect();
     std::fs::write(&path, wav(&tone)).unwrap();
-    let mut deck = Deck { synth: None, _playing: vec![], file: false, len: 0.0, from: 0.0, since: Instant::now(), paused: false };
-    deck.start(&Song::File(path.clone()), 0.0, 1).expect("MCI plays the WAV");
+    let mut deck = Deck { out: None, player: None, synth: None, len: 0.0, paused: false };
+    deck.start(&Song::File(path.clone()), 0.0, 1).expect("plays the WAV");
     assert!((deck.len - 6.0).abs() < 0.1, "len {}", deck.len);
     std::thread::sleep(Duration::from_millis(1200));
     assert!(deck.pos() > 0.8 && !deck.ended(), "pos {}", deck.pos());
-    mci("pause claudesona").unwrap();
-    deck.paused = true;
+    deck.pause();
     let held = deck.pos();
     std::thread::sleep(Duration::from_millis(400));
     assert!((deck.pos() - held).abs() < 0.05);
-    mci("seek claudesona to 5500").unwrap();
-    mci("play claudesona").unwrap();
-    deck.paused = false;
+    deck.seek(5.5);
+    deck.resume();
     std::thread::sleep(Duration::from_millis(1200));
     assert!(deck.ended(), "should have reached the end, pos {}", deck.pos());
     deck.silence();

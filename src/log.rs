@@ -155,7 +155,7 @@ pub fn clean(text: &str, max: usize) -> String {
 /// Polls every session log for new lines and sends events. History from before startup isn't replayed.
 pub fn watch(emit: impl Fn(&PathBuf, Event)) {
     // shortcut: scans ~/.claude/projects on this PC only; switch to hook-registered sessions (SPEC.md) for WSL.
-    let root = PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(".claude").join("projects");
+    let root = crate::cli::home().join(".claude").join("projects");
     // Read position per file: logs that exist at startup are skipped to their end; new ones are read from the start.
     let mut positions: HashMap<PathBuf, u64> = logs(&root).into_iter().map(|p| (p.clone(), len(&p))).collect();
     loop {

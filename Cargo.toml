@@ -8,7 +8,18 @@ eframe = { version = "0.37.0", features = ["glow", "persistence"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 serde_json = { version = "1", features = ["preserve_order"] } # keep the user's settings.json key order
 raw-window-handle = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_Multimedia", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] } # audio everywhere: her songs and your files
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"    # global cursor position, for click-through
+winit = "0.30"            # eframe's own winit: to keep her out of the Dock
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11-dl = "2.21"           # global cursor position on X11 (loaded at runtime, no build-time X libraries)
+winit = "0.30"            # eframe's own winit: to choose the X11 backend
 
 # Image decode/resize is painfully slow unoptimized; keep our code debuggable, deps fast.
 [profile.dev.package."*"]

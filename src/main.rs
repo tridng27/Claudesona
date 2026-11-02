@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"] // no console window behind her
+#![cfg_attr(windows, windows_subsystem = "windows")] // no console window behind her on Windows
 // Claudesona: a desktop mascot that mirrors Claude Code's work. Behaviour is specified in SPEC.md.
 // Drag to move, click to poke, right-click to quit.
 mod anim;
@@ -8,7 +8,9 @@ mod i18n;
 mod log;
 mod music;
 mod rewrite;
-mod win;
+#[cfg_attr(windows, path = "os_windows.rs")]
+#[cfg_attr(not(windows), path = "os_unix.rs")]
+mod os; // the few OS calls eframe doesn't cover
 
 use anim::Pose;
 use eframe::egui::{self, Color32, FontId, Mesh, Painter, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2, ViewportCommand, pos2, vec2};
@@ -118,13 +120,35 @@ fn load(ctx: &egui::Context, name: &str, skin: bool) -> Option<(TextureHandle, V
     Some((ctx.load_texture(name, ci, egui::TextureOptions::LINEAR), alpha, size))
 }
 
-/// Adds Windows fonts after egui's own, so Vietnamese, kaomoji (Japanese) and symbols render.
+/// System fonts that cover Vietnamese, kaomoji (Japanese) and symbols, per OS. Missing ones are skipped.
+const SYSTEM_FONTS: &[&str] = if cfg!(windows) {
+    &[r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\YuGothM.ttc", r"C:\Windows\Fonts\seguisym.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]
+} else if cfg!(target_os = "macos") {
+    &[
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/Apple Symbols.ttf",
+    ]
+} else {
+    &[
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    ]
+};
+
+/// Adds system fonts after egui's own, so Vietnamese, kaomoji (Japanese) and symbols render.
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    for (name, file) in [("segoe", "segoeui.ttf"), ("yugothic", "YuGothM.ttc"), ("symbols", "seguisym.ttf"), ("emoji", "seguiemj.ttf")] {
-        if let Ok(bytes) = std::fs::read(format!(r"C:\Windows\Fonts\{file}")) {
-            fonts.font_data.insert(name.into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
-            fonts.families.entry(egui::FontFamily::Proportional).or_default().push(name.into());
+    for (i, file) in SYSTEM_FONTS.iter().enumerate() {
+        let name = format!("system{i}");
+        if let Ok(bytes) = std::fs::read(file) {
+            fonts.font_data.insert(name.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+            fonts.families.entry(egui::FontFamily::Proportional).or_default().push(name);
         }
     }
     ctx.set_fonts(fonts);
@@ -187,6 +211,7 @@ struct App {
     waiting_line: &'static str, // the permission line picked for this prompt, so it doesn't change while she waits
     hwnd: isize,
     placed: bool, // checked that she's on screen after eframe restored her position
+    first_run: bool, // no saved window position yet
     terminal: isize, // foreground window when you last sent a prompt; double-click brings it back
     hidden_until: f32,
     shells: Vec<String>, // background commands still running in the followed session (task ids)
@@ -215,7 +240,7 @@ impl App {
             Ok(RawWindowHandle::Win32(w)) => w.hwnd.get(),
             _ => 0,
         };
-        win::remove_border(hwnd);
+        os::remove_border(hwnd);
         install_fonts(&ctx);
         // A skin folder with a readable idle.png replaces all built-in art, so characters never mix.
         let custom_idle = load(&ctx, "idle", true);
@@ -292,6 +317,7 @@ impl App {
             waiting_line: "",
             hwnd,
             placed: false,
+            first_run: saved("window").is_none(), // eframe's key for the saved window position
             terminal: 0,
             hidden_until: 0.0,
             shells: vec![],
@@ -324,7 +350,7 @@ impl App {
         if let Some(outer) = self.ctx.input(|i| i.viewport().outer_rect) {
             let feet = outer.min + vec2(outer.width() / 2.0, outer.height());
             let mut pos = feet - size * vec2(0.5, 1.0);
-            if let Some(work) = win::work_area(self.hwnd).map(|w| w / old) {
+            if let Some(work) = os::work_area(self.hwnd).map(|w| w / old) {
                 pos = pos.min(work.max - size).max(work.min); // a bigger her mustn't spill off screen
             }
             self.ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
@@ -439,7 +465,7 @@ impl App {
                 self.shells.clear(); // they belong to the session she stops following
             }
             self.session = Some(path.clone());
-            let fg = win::foreground();
+            let fg = os::foreground();
             if fg != 0 && fg != self.hwnd {
                 self.terminal = fg;
             }
@@ -622,9 +648,15 @@ impl eframe::App for App {
             // Match the window to the restored zoom; the saved window size can be from another zoom.
             let size = window_size();
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-            if let (Some(outer), Some(work)) = (ctx.input(|i| i.viewport().outer_rect), win::work_area(self.hwnd).map(|w| w / ctx.zoom_factor())) {
-                let x = outer.min.x.min(work.right() - size.x).max(work.left());
-                let y = outer.min.y.min(work.bottom() - size.y).max(work.top());
+            // macOS and Linux have no work-area call here: the monitor size stands in for it.
+            let work = os::work_area(self.hwnd)
+                .map(|w| w / ctx.zoom_factor())
+                .or_else(|| ctx.input(|i| i.viewport().monitor_size).map(|m| Rect::from_min_size(Pos2::ZERO, m)));
+            if let (Some(outer), Some(work)) = (ctx.input(|i| i.viewport().outer_rect), work) {
+                // First run off Windows (no saved spot, no taskbar corner at launch): bottom-right, clear of a dock or panel.
+                let start = if self.first_run && !cfg!(windows) { pos2(work.right() - size.x - 10.0, work.bottom() - size.y - 70.0) } else { outer.min };
+                let x = start.x.min(work.right() - size.x).max(work.left());
+                let y = start.y.min(work.bottom() - size.y).max(work.top());
                 if (x, y) != (outer.min.x, outer.min.y) {
                     ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(x, y)));
                 }
@@ -636,17 +668,25 @@ impl eframe::App for App {
         let aspect = self.sprites[0].open.aspect_ratio(); // poses share idle's canvas
         let body = Rect::from_min_max(pos2(feet.x - HEIGHT * aspect / 2.0, feet.y - HEIGHT), pos2(feet.x + HEIGHT * aspect / 2.0, feet.y));
 
-        // Clicks pass through everything except her and her bubbles. The cursor is read from Windows
+        // Clicks pass through everything except her and her bubbles. The cursor is read from the OS
         // because a pass-through window gets no mouse events to tell us when to switch back.
-        if let (Some((cx, cy)), Some(inner)) = (win::cursor(), ctx.input(|i| i.viewport().inner_rect)) {
+        // Where that isn't possible (a Wayland session), her whole window stays clickable.
+        let native_ppp = ctx.native_pixels_per_point().unwrap_or(1.0);
+        let want = if !os::click_through() {
+            Some(false)
+        } else if let (Some((cx, cy)), Some(inner)) = (os::cursor(native_ppp), ctx.input(|i| i.viewport().inner_rect)) {
             let ppp = ctx.pixels_per_point();
             let local = pos2(cx / ppp, cy / ppp) - inner.min.to_vec2();
             let dragging = ctx.input(|i| i.pointer.any_down()) && !self.passthrough;
-            let pass = !dragging && !self.hit(local, body, pose);
-            if pass != self.passthrough {
-                self.passthrough = pass;
-                ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(pass));
-            }
+            Some(!dragging && !self.hit(local, body, pose))
+        } else {
+            None
+        };
+        if let Some(pass) = want
+            && pass != self.passthrough
+        {
+            self.passthrough = pass;
+            ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(pass));
         }
 
         let resp = ui.interact(body, ui.scope_id().with("her"), Sense::click_and_drag());
@@ -661,7 +701,7 @@ impl eframe::App for App {
             }
         }
         if resp.double_clicked() && self.terminal != 0 {
-            win::focus(self.terminal);
+            os::focus(self.terminal);
         }
         self.hit_rects.clear();
         let text = i18n::ui();
@@ -1088,7 +1128,8 @@ fn open_music_folder() {
     std::thread::spawn(|| {
         let dir = music::music_dir();
         let _ = std::fs::create_dir_all(&dir);
-        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+        let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let _ = std::process::Command::new(opener).arg(&dir).spawn();
     });
 }
 
@@ -1119,6 +1160,23 @@ fn sweat_drop(painter: &Painter, c: Pos2, r: f32, alpha: f32) {
     painter.circle_filled(c + vec2(-r * 0.35, -r * 0.3), r * 0.25, Color32::WHITE.gamma_multiply(alpha));
 }
 
+/// macOS: an accessory app, so she has no Dock icon and doesn't take focus. Linux: the X11 backend (XWayland on a
+/// Wayland desktop), because Wayland lets no window keep itself on top or pick its own position.
+fn platform_event_loop() -> Option<eframe::EventLoopBuilderHook> {
+    #[cfg(target_os = "macos")]
+    return Some(Box::new(|b| {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        b.with_activation_policy(ActivationPolicy::Accessory);
+    }));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return Some(Box::new(|b| {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        b.with_x11();
+    }));
+    #[allow(unreachable_code)]
+    None
+}
+
 /// Window size in points; egui zoom turns it into her on-screen size.
 fn window_size() -> Vec2 {
     vec2(WIDTH, HEIGHT + 2.0 * MARGIN + BUBBLE_ROOM)
@@ -1145,13 +1203,14 @@ fn main() -> eframe::Result {
         .with_taskbar(false)
         .with_title("Claudesona");
     // First run: bottom-right above the taskbar. Later runs: eframe restores where you left her.
-    if let Some((right, bottom)) = win::work_area_corner() {
+    if let Some((right, bottom)) = os::work_area_corner() {
         viewport = viewport.with_position(pos2(right - size.x - 10.0, bottom - size.y));
     }
     let opts = eframe::NativeOptions {
         viewport,
         renderer: eframe::Renderer::Glow, // wgpu on Windows gives an opaque window
         persist_window: true,
+        event_loop_builder: platform_event_loop(),
         ..Default::default()
     };
     eframe::run_native("Claudesona", opts, Box::new(|cc| Ok(Box::new(App::new(cc, listener)))))

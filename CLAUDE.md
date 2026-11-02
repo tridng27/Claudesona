@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Claudesona is a Rust desktop mascot for Windows: a chibi anime girl who mirrors Claude Code's terminal work as speech bubbles.
+Claudesona is a Rust desktop mascot for Windows, macOS and Linux: a chibi anime girl who mirrors Claude Code's terminal work as speech bubbles. It's developed on Windows; macOS and Linux are built and tested by the GitHub Actions workflow (`.github/workflows/build.yml`) and haven't been run on real machines yet.
 - `SPEC.md` holds the product decisions (phases, bubbles, minis, interaction, rewriter flags). Read it before changing behavior, and update it when a decision changes.
 - `README.md` covers install, uninstall and deploying to other machines.
 
@@ -25,6 +25,7 @@ target\release\claudesona.exe uninstall   # remove her hooks from ~/.claude/sett
 ```
 
 - `cargo` lives in `~/.cargo/bin`, which isn't on Git Bash's PATH. Use PowerShell or the full path.
+- Type-check macOS and Linux from Windows with `cargo check --target aarch64-apple-darwin` and `cargo check --target x86_64-unknown-linux-gnu` (targets installed with rustup). The Linux check needs `PKG_CONFIG` pointing at a stand-in that prints `-lasound` and `PKG_CONFIG_ALLOW_CROSS=1`, because ALSA's build script looks for its headers; checking never links.
 - Close a running `claudesona.exe` before rebuilding, because Windows locks the file. `install` closes the installed copy by itself.
 - To test the hook path, pipe JSON into `claudesona.exe hook` using a real stdin pipe (e.g. .NET `Process` with `RedirectStandardInput`). PowerShell's `|` doesn't feed windowed exes.
 
@@ -48,6 +49,8 @@ Data flow into the UI thread, all on one `mpsc` channel (`Msg`):
 - After a permission prompt, log activity in the next 2s doesn't end Waiting. Claude Code writes its log late, so lines from just before the prompt still arrive.
 - The rewriter must keep the exact flag set in SPEC.md. `--no-session-persistence` keeps her from mirroring her own rewrites; `--restricted` keeps the user's hooks and plugins out. Don't swap in `--bare`: it only accepts API-key auth.
 - Use eframe's glow renderer (`Renderer::Glow`). The default wgpu renderer gives an opaque black window on Windows.
+- OS-specific calls live in `src/os_windows.rs` and `src/os_unix.rs` (same functions; `main.rs` picks one as `os`). Elsewhere, branch with `cfg!(windows)` / `cfg!(target_os = "macos")` and keep `windows-sys` inside `#[cfg(windows)]` code.
+- Sound goes through rodio on every OS (one player thread owns the device). On Linux she runs on X11 (`with_x11`), because Wayland can't keep a window on top; click-through is off on Wayland sessions (`os::click_through`).
 - eframe 0.37 apps implement `App::ui(&mut self, ui, frame)`, not `update`. `Mesh::colored_vertex` panics on textured meshes, so push `Vertex` structs directly.
 - Animation bends each pose image on a grid (`src/anim.rs`). There are no cut-out layers, because the AI art has nothing painted behind her hair or arms. Body-part regions are hard-coded fractions of the 1024×1536 canvas.
 - Art is compiled into the exe with `include_bytes!` from `assets/<pose>.png`. `assets/PROMPTS.md` holds the image prompts. A `skin` folder of `<pose>.png` files next to the exe overrides all of it when `skin/idle.png` loads (`custom()` / `load()` in `src/main.rs`).

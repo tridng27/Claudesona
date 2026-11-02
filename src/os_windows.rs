@@ -1,4 +1,4 @@
-// Small Windows calls eframe doesn't cover.
+// Small Windows calls eframe doesn't cover (the macOS and Linux versions are in os_unix.rs).
 use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use eframe::egui::{Rect, pos2};
@@ -11,9 +11,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Mouse position in physical screen pixels, even when the cursor isn't over our window.
-pub fn cursor() -> Option<(f32, f32)> {
+pub fn cursor(_native_ppp: f32) -> Option<(f32, f32)> {
     let mut p = POINT { x: 0, y: 0 };
     (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x as f32, p.y as f32))
+}
+
+/// Her see-through parts always let clicks through on Windows.
+pub fn click_through() -> bool {
+    true
 }
 
 /// The window you're typing in right now.

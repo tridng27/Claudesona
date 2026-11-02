@@ -1,6 +1,6 @@
 # Claudesona
 
-A chibi desktop mascot for Claude Code on Windows. While Claude works she shows what it's doing, retells its replies in her own cheerful voice, and waves you over when Claude needs your permission. When things get quiet she plays music for you, and she's always up for a word-guessing game.
+A chibi desktop mascot for Claude Code on Windows, macOS and Linux. While Claude works she shows what it's doing, retells its replies in her own cheerful voice, and waves you over when Claude needs your permission. When things get quiet she plays music for you, and she's always up for a word-guessing game.
 
 <p align="center"><img src="docs/tour.gif" alt="Claudesona introducing herself: idle, working, asking for permission, reading a reply, being poked, playing music, and her three game faces" width="330"></p>
 
@@ -34,11 +34,11 @@ There are six slow, chill songs, each with a written melody that phrases like su
 
 #### Your own songs and playlists
 
-Pick **Open music folder** from her right-click menu (or **Add songs** in the song list). It opens `%LOCALAPPDATA%\Programs\Claudesona\music` in Explorer:
+Pick **Open music folder** from her right-click menu (or **Add songs** in the song list). It opens the `music` folder in her install folder (see Install) in your file manager:
 
 - Make a folder inside it and drop songs in: each folder is a playlist named after the folder.
 - Songs placed directly in the music folder show up as "My music".
-- MP3, WAV, WMA, M4A, AAC and FLAC work (whatever Windows can play). A file that won't play is skipped.
+- MP3, M4A/AAC, FLAC, OGG and WAV work. A file that won't play is skipped.
 
 In the song list, the arrows next to the playlist name switch between "Claudesona's songs" and your playlists; click a song to play that playlist. The button on the left of the player cycles how the next song is picked:
 
@@ -64,30 +64,39 @@ Pick **Play with me** and she starts a game of hangman. Claude (Haiku) picks a w
 
 ## Install on a machine
 
-Needs Windows 10 or 11 and Claude Code. The `claude` command must be on PATH for her in-character rewrites and the word game. Without it she shows Claude's plain text, and the game uses a short built-in word list.
+Works on Windows 10/11, macOS and Linux (X11). Needs Claude Code. The `claude` command must be on PATH for her in-character rewrites and the word game. Without it she shows Claude's plain text, and the game uses a short built-in word list.
 
-1. Copy `claudesona.exe` to the machine. It's a single file with the art built in.
-2. Run `claudesona.exe install` from a terminal.
+1. Get the file for your system: `claudesona.exe` on Windows, `claudesona` on macOS and Linux. Build it yourself (see Build), or download it from the latest run of the `build` workflow under the repository's Actions tab. It's a single file with the art built in.
+2. Run `claudesona install` (`claudesona.exe install` on Windows) from a terminal.
 
 `install` does three things:
-- copies the exe to `%LOCALAPPDATA%\Programs\Claudesona\`
+- copies the file to her install folder:
+
+  | System | Install folder |
+  | :- | :- |
+  | Windows | `%LOCALAPPDATA%\Programs\Claudesona` |
+  | macOS | `~/Library/Application Support/Claudesona` |
+  | Linux | `~/.local/share/claudesona` |
+
 - adds five hooks (`SessionStart`, `SessionEnd`, `Notification`, `PermissionRequest` and `PreToolUse` for Bash/PowerShell) to `~/.claude/settings.json`, after saving a backup as `settings.json.claudesona-backup`
 - starts her
 
 From then on she starts with every new Claude Code session. Sessions that were already open need a restart.
 
-To update, run `install` again with the new exe. It replaces the running copy.
+To update, run `install` again with the new file. It replaces the running copy.
+
+On macOS, a downloaded (not self-built) file may be blocked as coming from an unidentified developer. Allow it under System Settings > Privacy & Security, or run `xattr -d com.apple.quarantine claudesona` once.
 
 ## Uninstall
 
-Run `claudesona.exe uninstall`. It removes her hooks (and nothing else) from `settings.json` and closes her. Then delete `%LOCALAPPDATA%\Programs\Claudesona` (move your `music` folder out first if you want to keep your songs).
+Run `claudesona uninstall`. It removes her hooks (and nothing else) from `settings.json` and closes her. Then delete her install folder (move your `music` folder out first if you want to keep your songs).
 
 ## Using her
 
 - **Drag** to move her. She remembers the spot.
 - **Click** her to poke her.
 - **Click** her reply bubble to show the longer version.
-- **Double-click** her to bring back the terminal you last sent a prompt from.
+- **Double-click** her to bring back the terminal you last sent a prompt from (Windows only).
 - **Right-click** for the menu:
   - **Size**: S, M or L
   - **Language**: EN or VI. In Vietnamese she calls herself "tớ" or "Phụ tá" and calls you "cậu"; her menus, lines, reply rewrites and the word game all switch (game words are Vietnamese written without tone marks, like MEO for "mèo", since you guess on an A-Z grid)
@@ -104,7 +113,7 @@ Size, position, language, the "While working" choice, your playlist and the play
 
 ## Custom art
 
-Make a `skin` folder next to the installed exe (`%LOCALAPPDATA%\Programs\Claudesona\skin`) and put your PNGs in it, then restart her:
+Make a `skin` folder in her install folder (see Install) and put your PNGs in it, then restart her:
 
 | File | Shown when | If missing |
 | :- | :- | :- |
@@ -129,12 +138,16 @@ Make a `skin` folder next to the installed exe (`%LOCALAPPDATA%\Programs\Claudes
 ## Build
 
 ```
-cargo build --release      # target\release\claudesona.exe is the file to ship
+cargo build --release      # target/release/claudesona (claudesona.exe on Windows) is the file to ship
 cargo test
 ```
 
+On Linux, building needs the ALSA headers for sound: `sudo apt install libasound2-dev pkg-config` (Debian/Ubuntu) or `sudo dnf install alsa-lib-devel` (Fedora). The `build` workflow in `.github/workflows` builds and tests all three systems on every push.
+
 ## Limits
 
-- She reads Claude Code session logs on the Windows side only. Claude Code running inside WSL isn't supported yet.
+- Linux: she runs as an X11 window (XWayland on Wayland desktops), because Wayland doesn't let a window stay on top or choose its position. On a Wayland session her see-through parts don't let clicks through, so her whole box is clickable. Transparency needs a compositor.
+- macOS and Linux: double-click doesn't bring your terminal back.
+- On Windows she can't see Claude Code running inside WSL yet.
 - Each reply rewrite and each new game word is a small `claude -p` call (Haiku) on the user's Claude plan.
-- Music volume follows the Windows mixer only.
+- Music volume follows your system volume only.
