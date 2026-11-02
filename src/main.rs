@@ -4,6 +4,7 @@
 mod anim;
 mod cli;
 mod log;
+mod music;
 mod rewrite;
 mod win;
 
@@ -21,12 +22,13 @@ const HEIGHT: f32 = 250.0; // her on-screen height
 const MARGIN: f32 = 30.0; // room for sway and hops
 const GRID: (usize, usize) = (24, 36);
 const WIDTH: f32 = 340.0;
-const BUBBLE_ROOM: f32 = 170.0; // space above her head for the speech bubble
+const BUBBLE_ROOM: f32 = 230.0; // space above her head for the speech bubble (and the music player)
 const MINI: f32 = 0.42; // mini height relative to hers
 const REWRITE_TIMEOUT: f32 = 30.0;
 const CREAM: Color32 = Color32::from_rgb(0xFB, 0xF4, 0xEA);
 const CORAL: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
 const INK: Color32 = Color32::from_rgb(0x4A, 0x2C, 0x22);
+const SOFT_INK: Color32 = Color32::from_rgb(0x8A, 0x5A, 0x4A);
 const SIZES: [(&str, f32); 3] = [("S", 0.75), ("M", 1.0), ("L", 1.35)]; // egui zoom; eframe saves it with egui's memory
 const IDLE_NUDGE: f32 = 25.0; // quiet seconds before she sparkles and offers help (after any bubble is gone)
 const IDLE_LINES: [&str; 5] = [
@@ -36,6 +38,18 @@ const IDLE_LINES: [&str; 5] = [
     "Your sidekick is getting bored~ any tasks for me?",
     "Bugs to squash? Features to make? Just say the word~!",
 ];
+const MUSIC_AFTER: f32 = 300.0; // idle seconds before she puts music on by herself
+// "What can I do": she shows each phase in its pose while explaining it.
+const TOUR_STEP: f32 = 7.0; // seconds per step
+const TOUR: [(Pose, &str); 6] = [
+    (Pose::Idle, "Hi hi~! I'm Claudesona, your sidekick! I watch Claude Code work and tell you all about it~"),
+    (Pose::Working, "When Claude gets busy, your sidekick works hard too! I show what it's doing: reading files, running commands…"),
+    (Pose::Waiting, "When Claude needs your OK, I'll strike a pose and shout so you never miss it!"),
+    (Pose::Idle, "When Claude finishes, your sidekick tells you the answer in my own words. Click my bubble to read more~"),
+    (Pose::Poke, "Poke me and I get grumpy… but double-click me and I'll bring your terminal back!"),
+    (Pose::Music, "When it's quiet for a while, I play lofi for you~ Right-click me for music, poses, size and more!"),
+];
+const WORK_MUSIC_KEY: &str = "work_music"; // eframe storage key for the "While working" choice
 const POKE_LINES: [&str; 4] = ["Hey~ I'm busy!", "Mou~ don't poke me!", "Hmph! What is it?", "That tickles... stop it!"];
 
 enum Msg {
@@ -79,6 +93,7 @@ fn asset(name: &str) -> Option<&'static [u8]> {
         "working_blink" => include_bytes!("../assets/working_blink.png"),
         "waiting" => include_bytes!("../assets/waiting.png"),
         "poke" => include_bytes!("../assets/poke.png"),
+        "music" => include_bytes!("../assets/music.png"),
         _ => return None,
     })
 }
@@ -182,6 +197,11 @@ struct App {
     shells: Vec<String>, // background commands still running in the followed session (task ids)
     nudge_at: f32,       // when she next offers help, if she stays idle and quiet
     sparkle_at: f32,     // when her last idle sparkle started
+    idle_since: f32,     // start of the current idle stretch
+    music: Option<bool>, // playing; true if she started it herself (it stops when work starts)
+    work_music: bool,    // use the music pose instead of the working pose while Claude works
+    tour: Option<(f32, usize)>, // "What can I do": start time and the step already said
+    playlist_open: bool,
 }
 
 impl App {
@@ -202,7 +222,7 @@ impl App {
             let (open, alpha, size) = load(&ctx, name, skin).unwrap_or_else(|| (idle.clone(), idle_alpha.clone(), idle_size));
             Sprite { open, blink: load(&ctx, blink, skin).map(|l| l.0), alpha, size }
         };
-        let sprites = vec![sprite("idle", "idle_blink"), sprite("working", "working_blink"), sprite("waiting", ""), sprite("poke", "")];
+        let sprites = vec![sprite("idle", "idle_blink"), sprite("working", "working_blink"), sprite("waiting", ""), sprite("poke", ""), sprite("music", "")];
 
         let (outbox, inbox) = channel();
         let tx = outbox.clone();
@@ -250,6 +270,11 @@ impl App {
             shells: vec![],
             nudge_at: IDLE_NUDGE,
             sparkle_at: -99.0,
+            idle_since: 0.0,
+            music: None,
+            work_music: cc.storage.and_then(|s| s.get_string(WORK_MUSIC_KEY)).is_some_and(|v| v == "true"),
+            tour: None,
+            playlist_open: false,
         }
     }
 
@@ -291,7 +316,23 @@ impl App {
         if self.shells.is_empty() { Pose::Idle } else { Pose::Working }
     }
 
+    fn set_music(&mut self, on: bool, t: f32) {
+        if on {
+            music::play();
+            self.music = Some(false);
+            self.say("Lofi time~ Your sidekick picked a chill one for you!".into(), None, t - 4.0);
+        } else {
+            music::stop();
+            self.music = None;
+            self.idle_since = t; // stopping it means no auto-play for another while
+        }
+    }
+
     fn handle(&mut self, msg: Msg, t: f32) {
+        // A new prompt or a permission request ends the introduction; other activity carries on underneath it.
+        if matches!(msg, Msg::Log(_, Event::Prompt)) || matches!(&msg, Msg::Hook(v) if v["hook_event_name"] == "PermissionRequest") {
+            self.tour = None;
+        }
         let (path, ev) = match msg {
             Msg::Rewritten { short, long } => {
                 // A rewrite that arrives after the timeout already showed the plain reply: drop it.
@@ -414,6 +455,11 @@ impl App {
 }
 
 impl eframe::App for App {
+    // eframe calls this every 30s and on exit, next to the window position and size it already saves.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(WORK_MUSIC_KEY, self.work_music.to_string());
+    }
+
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
     }
@@ -447,13 +493,47 @@ impl eframe::App for App {
         }
 
         let poke_t = self.poke_at.map(|p| t - p).filter(|d| *d < 1.5);
-        let pose = if poke_t.is_some() { Pose::Poke } else { self.pose };
+        // The pose to show: music replaces idle, and optionally working; pokes and the tour override.
+        let mut pose = match self.pose {
+            Pose::Idle if self.music.is_some() => Pose::Music,
+            Pose::Working if self.work_music => Pose::Music,
+            p => p,
+        };
+        if poke_t.is_some() {
+            pose = Pose::Poke;
+        }
+        let mut tour_line = None; // drawn over her usual bubble, which stays for afterwards
+        if let Some((start, said)) = self.tour {
+            let step = ((t - start) / TOUR_STEP) as usize;
+            if let Some((tour_pose, line)) = TOUR.get(step) {
+                pose = *tour_pose;
+                if step != said {
+                    self.tour = Some((start, step));
+                    if step == 3 {
+                        self.sparkle_at = t;
+                    }
+                }
+                tour_line = Some(Bubble { short: line.to_string(), long: None, expanded: false, hide_at: f32::MAX, is_label: false });
+            } else {
+                self.tour = None;
+            }
+        }
         if t > self.blink_at + 0.13 {
             self.blink_at = t + 3.0 + 3.0 * self.rand01();
         }
         let blinking = t > self.blink_at;
-        // Idle with nothing on screen for a while: sparkle and offer to help.
-        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() {
+        // Long idle: she puts on music. Music she started herself stops when work starts.
+        if self.pose != Pose::Idle {
+            self.idle_since = t;
+            if self.music == Some(true) {
+                self.set_music(false, t);
+            }
+        } else if self.music.is_none() && t - self.idle_since > MUSIC_AFTER {
+            self.set_music(true, t);
+            self.music = Some(true);
+        }
+        // Idle with nothing on screen for a while: sparkle and offer to help. Not while music plays: that's chill time.
+        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() {
             self.nudge_at = t + IDLE_NUDGE;
         } else if t > self.nudge_at {
             let line = IDLE_LINES[(self.rand01() * IDLE_LINES.len() as f32) as usize % IDLE_LINES.len()];
@@ -519,6 +599,25 @@ impl eframe::App for App {
                     }
                 }
             });
+            if ui.button(if self.music.is_some() { "Stop music" } else { "Play lofi music" }).clicked() {
+                self.set_music(self.music.is_none(), t);
+                ui.close();
+            }
+            ui.horizontal(|ui| {
+                ui.label("While working");
+                if ui.selectable_label(!self.work_music, "Working").clicked() {
+                    self.work_music = false;
+                    ui.close();
+                }
+                if ui.selectable_label(self.work_music, "Music").clicked() {
+                    self.work_music = true;
+                    ui.close();
+                }
+            });
+            if ui.button("What can I do").clicked() {
+                self.tour = Some((t, usize::MAX));
+                ui.close();
+            }
             if ui.button("Hide for 10 min").clicked() {
                 self.hidden_until = t + 600.0;
                 ui.close();
@@ -537,6 +636,16 @@ impl eframe::App for App {
             let bob = (t * 6.0).sin().abs() * 6.0;
             let at = pos2(body.right() - 38.0, body.top() + 30.0 - bob);
             painter.text(at, egui::Align2::CENTER_CENTER, "!", FontId::proportional(34.0), CORAL);
+        }
+        let player = self.music.and_then(|_| music::status());
+        if pose == Pose::Music && !player.is_some_and(|p| p.paused) {
+            // Notes drift up beside her and fade.
+            for i in 0..3 {
+                let p = (t / 3.0 + i as f32 / 3.0).fract();
+                let x = body.right() - 30.0 + (p * 7.0 + i as f32).sin() * 8.0 - i as f32 * 10.0;
+                let y = body.top() + body.height() * 0.45 - p * 70.0;
+                music_note(painter, pos2(x, y), (1.0 - p) * (p * 5.0).min(1.0));
+            }
         }
         // Positions are fractions of her canvas: beside her head, clear of her hair.
         let at = |fx: f32, fy: f32| pos2(body.left() + body.width() * fx, body.top() + body.height() * fy);
@@ -572,19 +681,94 @@ impl eframe::App for App {
             draw_box(painter, text, FontId::proportional(10.0), INK, 90.0, mfeet - vec2(0.0, HEIGHT * MINI + 2.0), false);
         }
 
+        // Media player above her head while music is on; her speech bubble sits above it.
+        let mut anchor = pos2(area.center().x, (feet.y - HEIGHT + 4.0).max(area.top() + 2.0));
+        let mut list_shown = false;
+        if let Some(st) = player {
+            let w = WIDTH - 40.0;
+            let card = Rect::from_min_size(anchor - vec2(w / 2.0, 62.0), vec2(w, 58.0));
+            painter.rect(card, 10.0, CREAM, Stroke::new(2.0, CORAL), egui::StrokeKind::Inside);
+            self.hit_rects.push(card);
+            let small = FontId::proportional(12.5);
+            painter.text(card.left_top() + vec2(10.0, 6.0), egui::Align2::LEFT_TOP, music::name(st.track), small.clone(), INK);
+            let time = format!("{} / {}", mmss(st.pos), mmss(st.len));
+            painter.text(card.right_top() + vec2(-10.0, 6.0), egui::Align2::RIGHT_TOP, time, small, SOFT_INK);
+            // Progress bar: click to jump.
+            let bar = Rect::from_min_size(card.left_top() + vec2(10.0, 27.0), vec2(w - 20.0, 4.0));
+            let done = if st.len > 0.0 { (st.pos / st.len).clamp(0.0, 1.0) } else { 0.0 };
+            painter.rect_filled(bar, 2.0, CORAL.gamma_multiply(0.25));
+            painter.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * done, bar.height())), 2.0, CORAL);
+            painter.circle_filled(pos2(bar.left() + bar.width() * done, bar.center().y), 4.0, CORAL);
+            let seek = ui.interact(bar.expand2(vec2(0.0, 6.0)), ui.scope_id().with("seek"), Sense::click());
+            if seek.clicked() && let Some(p) = seek.interact_pointer_pos() {
+                music::seek((p.x - bar.left()) / bar.width() * st.len);
+                self.music = Some(false); // you're choosing now: don't stop it when work starts
+            }
+            let icons = [Icon::Prev, if st.paused { Icon::Play } else { Icon::Pause }, Icon::Next, Icon::List, Icon::Stop];
+            for (i, icon) in icons.into_iter().enumerate() {
+                let c = pos2(card.center().x + (i as f32 - 2.0) * 38.0, card.top() + 44.0);
+                let r = ui.interact(Rect::from_center_size(c, vec2(30.0, 20.0)), ui.scope_id().with(("player", i)), Sense::click());
+                if r.hovered() || (icon == Icon::List && self.playlist_open) {
+                    painter.rect_filled(r.rect, 6.0, CORAL.gamma_multiply(0.18));
+                }
+                draw_icon(painter, icon, c, INK);
+                if r.clicked() {
+                    match icon {
+                        Icon::Prev => music::prev(),
+                        Icon::Play | Icon::Pause => music::toggle_pause(),
+                        Icon::Next => music::next(),
+                        Icon::List => self.playlist_open = !self.playlist_open,
+                        Icon::Stop => self.set_music(false, t),
+                    }
+                    if icon != Icon::Stop {
+                        self.music = Some(false);
+                    }
+                }
+            }
+            anchor.y = card.top() - 4.0;
+            if self.playlist_open {
+                // All songs, above the player, in place of her bubble.
+                let row = 22.0;
+                let h = music::COUNT as f32 * row + 12.0;
+                let list = Rect::from_min_size(pos2(card.left(), anchor.y - h), vec2(w, h));
+                painter.rect(list, 10.0, CREAM, Stroke::new(2.0, CORAL), egui::StrokeKind::Inside);
+                self.hit_rects.push(list);
+                for i in 0..music::COUNT {
+                    let r = Rect::from_min_size(list.min + vec2(6.0, 6.0 + i as f32 * row), vec2(w - 12.0, row));
+                    let resp = ui.interact(r, ui.scope_id().with(("song", i)), Sense::click());
+                    let playing = i == st.track;
+                    if playing || resp.hovered() {
+                        painter.rect_filled(r, 6.0, CORAL.gamma_multiply(if playing { 0.25 } else { 0.12 }));
+                    }
+                    let label = format!("{}.  {}", i + 1, music::name(i));
+                    painter.text(r.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, label, FontId::proportional(13.0), INK);
+                    if playing {
+                        draw_icon(painter, if st.paused { Icon::Pause } else { Icon::Play }, r.right_center() - vec2(14.0, 0.0), CORAL);
+                    }
+                    if resp.clicked() {
+                        music::play_track(i);
+                        self.music = Some(false);
+                        self.playlist_open = false;
+                    }
+                }
+                list_shown = true;
+            }
+        } else {
+            self.playlist_open = false;
+        }
+
         let mut toggle = false;
-        if let Some(b) = &self.bubble {
+        if !list_shown && let Some(b) = tour_line.as_ref().or(self.bubble.as_ref()) {
             let (text, font, color) = match (&b.long, b.expanded, b.is_label) {
                 (_, _, true) => (b.short.clone(), FontId::proportional(12.5), Color32::from_rgb(0x8A, 0x5A, 0x4A)),
                 (Some(long), true, _) => (long.clone(), FontId::proportional(14.0), INK),
                 (Some(_), false, _) => (format!("{}\n(click for more)", b.short), FontId::proportional(14.0), INK),
                 (None, _, _) => (b.short.clone(), FontId::proportional(14.0), INK),
             };
-            let anchor = pos2(area.center().x, (feet.y - HEIGHT + 4.0).max(area.top() + 2.0));
             // shortcut: text taller than BUBBLE_ROOM clips at the top of the window
             let rect = draw_box(painter, &text, font, color, WIDTH - 40.0, anchor, true);
             self.hit_rects.push(rect);
-            toggle = !b.is_label && b.long.is_some() && ui.interact(rect, ui.scope_id().with("bubble"), Sense::click()).clicked();
+            toggle = tour_line.is_none() && !b.is_label && b.long.is_some() && ui.interact(rect, ui.scope_id().with("bubble"), Sense::click()).clicked();
         }
         if toggle && let Some(b) = &mut self.bubble {
             b.expanded = !b.expanded;
@@ -605,6 +789,61 @@ fn sparkle(painter: &Painter, c: Pos2, r: f32, alpha: f32) {
     painter.line_segment([c - vec2(d, d), c + vec2(d, d)], thin);
     painter.line_segment([c - vec2(d, -d), c + vec2(d, -d)], thin);
     painter.circle_filled(c, r * 0.22, Color32::WHITE.gamma_multiply(alpha));
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Icon {
+    Prev,
+    Play,
+    Pause,
+    Next,
+    List,
+    Stop,
+}
+
+/// Player button icons as shapes: symbol fonts aren't guaranteed to have them.
+fn draw_icon(painter: &Painter, icon: Icon, c: Pos2, color: Color32) {
+    let tri = |dir: f32, at: Pos2| egui::Shape::convex_polygon(vec![at + vec2(-4.0 * dir, -5.0), at + vec2(5.0 * dir, 0.0), at + vec2(-4.0 * dir, 5.0)], color, Stroke::NONE);
+    let bar = |x: f32| Rect::from_center_size(c + vec2(x, 0.0), vec2(2.5, 10.0));
+    match icon {
+        Icon::Play => {
+            painter.add(tri(1.0, c));
+        }
+        Icon::Pause => {
+            painter.rect_filled(bar(-3.0), 1.0, color);
+            painter.rect_filled(bar(3.0), 1.0, color);
+        }
+        Icon::Prev => {
+            painter.add(tri(-1.0, c + vec2(1.5, 0.0)));
+            painter.rect_filled(bar(-5.0), 1.0, color);
+        }
+        Icon::Next => {
+            painter.add(tri(1.0, c - vec2(1.5, 0.0)));
+            painter.rect_filled(bar(5.0), 1.0, color);
+        }
+        Icon::List => {
+            for y in [-4.0, 0.0, 4.0] {
+                painter.line_segment([c + vec2(-6.0, y), c + vec2(6.0, y)], Stroke::new(1.8, color));
+            }
+        }
+        Icon::Stop => {
+            painter.rect_filled(Rect::from_center_size(c, vec2(9.0, 9.0)), 1.5, color);
+        }
+    }
+}
+
+fn mmss(secs: f32) -> String {
+    let s = secs.max(0.0) as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// An eighth note: a tilted head, a stem and a flag.
+fn music_note(painter: &Painter, at: Pos2, alpha: f32) {
+    let c = CORAL.gamma_multiply(alpha);
+    painter.add(egui::Shape::ellipse_filled(at, vec2(4.5, 3.5), c));
+    let top = at + vec2(4.0, -16.0);
+    painter.line_segment([at + vec2(4.0, -1.0), top], Stroke::new(1.6, c));
+    painter.line_segment([top, top + vec2(6.0, 6.0)], Stroke::new(2.0, c));
 }
 
 /// An anime sweat drop: a circle of radius `r` at `c` with a point on top.

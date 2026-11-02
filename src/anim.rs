@@ -10,6 +10,7 @@ pub enum Pose {
     Working = 1,
     Waiting = 2,
     Poke = 3,
+    Music = 4,
 }
 
 struct Style {
@@ -19,14 +20,16 @@ struct Style {
     hair: f32,   // hair-tip swing, height units
     breath: f32, // stretch of the upper body
     hop: f32,    // bounce height
+    hand: f32,   // raised-hand wave, degrees (music pose only)
 }
 
 fn style(pose: Pose) -> Style {
     match pose {
-        Pose::Idle => Style { speed: 1.0, sway: 2.0, head: 3.0, hair: 0.012, breath: 0.010, hop: 0.0 },
-        Pose::Working => Style { speed: 2.2, sway: 0.6, head: 1.5, hair: 0.008, breath: 0.006, hop: 0.010 },
-        Pose::Waiting => Style { speed: 1.5, sway: 2.5, head: 4.0, hair: 0.015, breath: 0.012, hop: 0.018 },
-        Pose::Poke => Style { speed: 1.0, sway: 0.0, head: 0.0, hair: 0.010, breath: 0.0, hop: 0.0 },
+        Pose::Idle => Style { speed: 1.0, sway: 2.0, head: 3.0, hair: 0.012, breath: 0.010, hop: 0.0, hand: 0.0 },
+        Pose::Working => Style { speed: 2.2, sway: 0.6, head: 1.5, hair: 0.008, breath: 0.006, hop: 0.010, hand: 0.0 },
+        Pose::Waiting => Style { speed: 1.5, sway: 2.5, head: 4.0, hair: 0.015, breath: 0.012, hop: 0.018, hand: 0.0 },
+        Pose::Music => Style { speed: 0.8, sway: 2.5, head: 3.5, hair: 0.014, breath: 0.010, hop: 0.0, hand: 7.0 },
+        Pose::Poke => Style { speed: 1.0, sway: 0.0, head: 0.0, hair: 0.010, breath: 0.0, hop: 0.0, hand: 0.0 },
     }
 }
 
@@ -60,6 +63,10 @@ pub fn warp(u: f32, v: f32, t: f32, pose: Pose, poke_t: f32, aspect: f32) -> Vec
     let skirt = ramp(0.52, 0.62, v) * ramp(0.72, 0.64, v);
     p.x += st.hair * 0.5 * (s - 0.5).sin() * skirt;
 
+    // Music pose: her raised hand (viewer's left, wrist to fingertips) waves around the elbow, twice per sway.
+    let hand = ramp(0.31, 0.20, u) * ramp(0.30, 0.33, v) * ramp(0.50, 0.46, v);
+    p = rotate(p, vec2((0.30 - 0.5) * aspect, 0.43 - 1.0), st.hand * (2.0 * s).sin() * hand);
+
     // Head tilts around the neck.
     let neck = vec2(0.0, 0.38 - 1.0);
     let head = ramp(0.44, 0.34, v);
@@ -86,6 +93,12 @@ mod tests {
                 assert!((p - vec2((u - 0.5) * 0.667, 0.0)).length() < 1e-4, "t={t} u={u} p={p:?}");
             }
         }
+    }
+
+    #[test]
+    fn music_hand_waves_but_body_stays() {
+        let moved = |u: f32, v: f32| (0..30).map(|i| (warp(u, v, i as f32 * 0.1, Pose::Music, 9.0, 0.667) - warp(u, v, 0.0, Pose::Music, 9.0, 0.667)).length()).fold(0.0, f32::max);
+        assert!(moved(0.12, 0.36) > 2.0 * moved(0.5, 0.45));
     }
 
     #[test]

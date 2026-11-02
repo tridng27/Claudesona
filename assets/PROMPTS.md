@@ -1,6 +1,6 @@
 # Claudesona art prompts
 
-Six images, made with any AI image tool that accepts a reference image.
+Seven images, made with any AI image tool that accepts a reference image.
 
 ## Steps
 
@@ -40,7 +40,15 @@ Replace `[Character]` and `[Style]` in each prompt with these, word for word. Id
 ### 6. `poke.png`
 > [Character] Same character as the reference image. She has just been poked and is a bit annoyed: half-lidded unimpressed eyes looking toward the viewer, one cheek puffed out in a small pout, brows slightly lowered, arms crossed, a light blush. Mildly grumpy, not angry. [Style]
 
+### 7. `music.png` (no blink image needed: her eyes are already closed)
+> [Character] Same character as the reference image. She is quietly enjoying music, serene and peaceful: eyes gently closed into soft relaxed curves, a small calm smile, a faint blush, head tilted slightly to her left. Her right hand (on the viewer's left) is raised out to the side at about shoulder height, well away from her body and hair, palm facing down and fingers loose and relaxed, as if softly swaying along to the beat. Her left hand rests lightly at her side. No headphones, no accessories, nothing added beyond the reference outfit. Same standing position and body size as the reference, feet together on the same spot. [Style]
+
+Tips for this one:
+- The app sways her raised hand to the beat, so the hand and sleeve need empty space around them: no overlap with her hair, face or body. If the tool tucks the hand in close, regenerate.
+- If the tool adds music notes or headphones anyway, regenerate or erase them: the app draws the floating notes itself.
+- Check that her hair outline and sweater still match the master.
+
 ## Not needed
 
 - Mini versions: the app reuses these images at half size.
-- Effects like the "!" above her head, sparkles and sweat drops: the app draws them.
+- Effects like the "!" above her head, sparkles, sweat drops and music notes: the app draws them.
