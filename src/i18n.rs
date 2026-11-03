@@ -42,6 +42,9 @@ pub struct Ui {
     pub music: &'static str,
     pub open_music_folder: &'static str,
     pub play_with_me: &'static str,
+    pub sudoku: &'static str,
+    pub new_puzzle: &'static str,
+    pub erase: &'static str,
     pub what_can_i_do: &'static str,
     pub hide: &'static str,
     pub quit: &'static str,
@@ -95,6 +98,9 @@ const EN_UI: Ui = Ui {
     music: "Music",
     open_music_folder: "Open music folder",
     play_with_me: "Play with me",
+    sudoku: "Sudoku",
+    new_puzzle: "New puzzle",
+    erase: "Erase",
     what_can_i_do: "What can I do",
     hide: "Hide for 10 min",
     quit: "Quit",
@@ -148,6 +154,9 @@ const VI_UI: Ui = Ui {
     music: "Chơi nhạc",
     open_music_folder: "Mở thư mục nhạc",
     play_with_me: "Chơi với tớ",
+    sudoku: "Sudoku",
+    new_puzzle: "Câu đố mới",
+    erase: "Xoá",
     what_can_i_do: "Tớ làm được gì",
     hide: "Ẩn 10 phút",
     quit: "Thoát",
@@ -214,6 +223,8 @@ pub struct Lines {
     pub last_heart: &'static [&'static str],
     pub player_won: &'static [&'static str],
     pub player_lost: &'static [&'static str],
+    pub sudoku_start: &'static [&'static str],
+    pub sudoku_won: &'static [&'static str],
     pub commands: [&'static [&'static str]; 9], // by command kind; see log::command_kind
 }
 
@@ -346,6 +357,16 @@ const EN_LINES: Lines = Lines {
         "Yaaay, I win~! {w}! Your sidekick is unbeatable! (★ω★)",
         "It was {w}! Sooo close… but not close enough~ (￣ー￣)",
         "Winner winner~! The word was {w}! ☆",
+    ],
+    sudoku_start: &[
+        "Sudoku time~ Pick a square, then a number! (｀・ω・´)",
+        "Your sidekick made a puzzle just for you~ ✧",
+        "Fill every row, column and box with 1 to 9~ you got this! ☆",
+    ],
+    sudoku_won: &[
+        "Yaaay, you solved it! So smart~! (★ω★)",
+        "Every number in its place~ amazing! \\(^o^)/",
+        "Puzzle cleared! Your sidekick is impressed~ ✧",
     ],
     commands: [
         &["Running the tests… fingers crossed~! (>_<)", "Test time! Pleeease pass, please pass…", "Making sure nothing broke~ (・ω・)", "Testing, testing~ one, two, three! ☆", "Come on, green checkmarks~! (｀・ω・´)"],
@@ -490,6 +511,16 @@ const VI_LINES: Lines = Lines {
         "Là từ {w} đó! Gần lắm… nhưng chưa đủ gần~ (￣ー￣)",
         "Người thắng là phụ tá~! Từ đó là {w}! ☆",
     ],
+    sudoku_start: &[
+        "Chơi Sudoku nè~ Chọn một ô rồi chọn số nha! (｀・ω・´)",
+        "Tớ làm riêng một câu đố cho cậu nè~ ✧",
+        "Điền 1 đến 9 vào mỗi hàng, cột và khối nha~ cố lên! ☆",
+    ],
+    sudoku_won: &[
+        "Yeee, cậu giải xong rồi! Giỏi quá đi~! (★ω★)",
+        "Số nào cũng đúng chỗ hết~ đỉnh thật! \\(^o^)/",
+        "Xong câu đố! Tớ phục cậu luôn đó~ ✧",
+    ],
     commands: [
         &["Đang chạy test… cầu mong pass hết ha~! (>_<)", "Giờ test nè! Qua điii, qua điii…", "Kiểm tra xem có gì hỏng không~ (・ω・)", "Test, test~ một, hai, ba! ☆", "Cố lên mấy dấu tích xanh~! (｀・ω・´)"],
         &["Đang mò git nè~ (・ω・)", "Lật lại sổ lịch sử! ✧", "Gõ lệnh git hả? Để phụ tá lo~ (￣▽￣)", "Lưu tiến độ nè~ ☆", "Xem có gì thay đổi nào~ (・_・)"],
@@ -516,7 +547,7 @@ pub fn lines() -> &'static Lines {
 pub fn voiced() -> Vec<(&'static str, &'static str)> {
     let mut out = vec![];
     for (l, code) in [(&EN_LINES, "en"), (&VI_LINES, "vi")] {
-        for set in [l.waiting, l.working, l.idle, l.poke, l.music, l.bye, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost] {
+        for set in [l.waiting, l.working, l.idle, l.poke, l.music, l.bye, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
             out.extend(set.iter().filter(|s| !s.contains('{')).map(|s| (*s, code)));
         }
         out.extend(l.tour.iter().map(|(_, s)| (*s, code)));
@@ -564,7 +595,7 @@ mod tests {
     #[test]
     fn both_languages_have_every_line_set() {
         for l in [&EN_LINES, &VI_LINES] {
-            for set in [l.idle, l.bye, l.working, l.poke, l.waiting, l.music, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost] {
+            for set in [l.idle, l.bye, l.working, l.poke, l.waiting, l.music, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
                 assert!(set.len() >= 3);
             }
             assert!(l.commands.iter().all(|c| c.len() >= 3));

@@ -5,6 +5,7 @@ mod anim;
 mod chat;
 mod cli;
 mod game;
+mod sudoku;
 mod i18n;
 mod log;
 mod music;
@@ -257,6 +258,7 @@ struct App {
     lang: i18n::Lang,          // remembered
     playlist_name: String,     // remembered: the playlist to play
     game: Option<game::Game>,
+    sudoku: Option<sudoku::Sudoku>,
     game_loading: bool,
     recent_words: Vec<String>,  // so new rounds don't repeat
     game_line: String, // what she's saying in the game panel
@@ -373,6 +375,7 @@ impl App {
             playlist_name,
             lang,
             game: None,
+            sudoku: None,
             game_loading: false,
             recent_words: vec![],
             game_line: String::new(),
@@ -449,7 +452,7 @@ impl App {
 
     /// Asks Haiku for a word on a worker thread; the panel shows "thinking" until it arrives.
     fn start_game(&mut self) {
-        (self.game, self.game_loading, self.tour) = (None, true, None);
+        (self.game, self.game_loading, self.tour, self.sudoku) = (None, true, None, None);
         self.game_line = game::line(i18n::lines().thinking, self.rand01(), "");
         voice::say(&self.game_line, voice::Mode::Chatter);
         let (tx, wake, avoid) = (self.outbox.clone(), self.ctx.clone(), self.recent_words.clone());
@@ -459,6 +462,106 @@ impl App {
             let _ = tx.send(Msg::Game { word, hint });
             wake.request_repaint();
         });
+    }
+
+    /// A fresh puzzle, made right here: it takes well under a millisecond.
+    fn start_sudoku(&mut self) {
+        (self.game, self.game_loading, self.tour) = (None, false, None);
+        self.sudoku = Some(sudoku::Sudoku::new((self.rand01() * 1_000_000.0) as u32));
+        self.game_line = game::line(i18n::lines().sudoku_start, self.rand01(), "");
+        voice::say(&self.game_line, voice::Mode::Chatter);
+    }
+
+    /// A game panel is open (or a hangman word is on its way).
+    fn playing(&self) -> bool {
+        self.game.is_some() || self.game_loading || self.sudoku.is_some()
+    }
+
+    /// Her line, the 9x9 grid, and beside it a 1-9 pad and the buttons. Click a cell, then a number.
+    fn sudoku_panel(&mut self, ui: &egui::Ui, painter: &Painter, anchor: Pos2, t: f32) {
+        let Some(s) = &self.sudoku else { return };
+        let text = i18n::ui();
+        let w = WIDTH - 40.0;
+        let panel = Rect::from_min_size(anchor - vec2(w / 2.0, 222.0), vec2(w, 220.0));
+        painter.rect(panel, 10.0, CREAM, Stroke::new(2.0, CORAL), egui::StrokeKind::Inside);
+        self.hit_rects.push(panel);
+        let said = painter.layout(self.game_line.clone(), FontId::proportional(12.5), INK, w - 20.0);
+        painter.galley(panel.min + vec2(10.0, 8.0), said, INK);
+        let (cell, top) = (17.0, panel.top() + 46.0);
+        let grid = Rect::from_min_size(pos2(panel.left() + 10.0, top), Vec2::splat(9.0 * cell));
+        let (won, sel) = (s.won(), s.selected);
+        let (mut pick, mut put) = (None, None);
+        for i in 0..81 {
+            let r = Rect::from_min_size(grid.min + vec2((i % 9) as f32, (i / 9) as f32) * cell, Vec2::splat(cell));
+            let resp = ui.interact(r, ui.scope_id().with(("cell", i)), Sense::click());
+            let near = sel.is_some_and(|j| i / 9 == j / 9 || i % 9 == j % 9 || (i / 27 == j / 27 && i % 9 / 3 == j % 9 / 3));
+            let fill = if sel == Some(i) {
+                CORAL.gamma_multiply(0.4)
+            } else if resp.hovered() && !won {
+                CORAL.gamma_multiply(0.2)
+            } else if near {
+                CORAL.gamma_multiply(0.1)
+            } else {
+                Color32::TRANSPARENT
+            };
+            painter.rect_filled(r, 0.0, fill);
+            painter.rect_stroke(r, 0.0, Stroke::new(0.5, INK.gamma_multiply(0.15)), egui::StrokeKind::Inside);
+            if s.cells[i] != 0 {
+                let ink = if s.clash(i) { Color32::from_rgb(0xD0, 0x30, 0x30) } else if s.given[i] { INK } else { CORAL };
+                painter.text(r.center(), egui::Align2::CENTER_CENTER, s.cells[i], FontId::proportional(12.5), ink);
+            }
+            if resp.clicked() && !won {
+                pick = Some(i);
+            }
+        }
+        // Thick lines around the 3x3 boxes.
+        for k in 0..=3 {
+            let d = k as f32 * 3.0 * cell;
+            let stroke = Stroke::new(1.5, INK.gamma_multiply(0.6));
+            painter.line_segment([grid.min + vec2(d, 0.0), grid.min + vec2(d, grid.height())], stroke);
+            painter.line_segment([grid.min + vec2(0.0, d), grid.min + vec2(grid.width(), d)], stroke);
+        }
+        // The 1-9 pad, then Erase, New puzzle and Close.
+        let (left, pad_on) = (grid.right() + 12.0, sel.is_some_and(|i| !s.given[i]) && !won);
+        let btn = |r: Rect, id: (&str, usize), label: String, on: bool| {
+            let resp = ui.interact(r, ui.scope_id().with(id), Sense::click());
+            let fill = if resp.hovered() && on { CORAL.gamma_multiply(0.3) } else { CORAL.gamma_multiply(0.12) };
+            painter.rect(r, 6.0, fill, Stroke::new(1.0, CORAL.gamma_multiply(if on { 1.0 } else { 0.4 })), egui::StrokeKind::Inside);
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, label, FontId::proportional(12.5), if on { INK } else { INK.gamma_multiply(0.35) });
+            resp.clicked() && on
+        };
+        for v in 1..=9u8 {
+            let k = (v - 1) as f32;
+            let r = Rect::from_min_size(pos2(left + (k % 3.0) * 38.0, top + (k / 3.0).floor() * 29.0), vec2(35.0, 26.0));
+            if btn(r, ("pad", v as usize), v.to_string(), pad_on) {
+                put = Some(v);
+            }
+        }
+        let row = |n: f32| Rect::from_min_size(pos2(left, top + 90.0 + n * 28.0), vec2(111.0, 24.0));
+        if btn(row(0.0), ("sudoku-btn", 0), text.erase.into(), pad_on) {
+            put = Some(0);
+        }
+        let again = btn(row(1.0), ("sudoku-btn", 1), text.new_puzzle.into(), true);
+        let close = btn(row(2.0), ("sudoku-btn", 2), text.close.into(), true);
+        if let Some(s) = &mut self.sudoku {
+            if pick.is_some() {
+                s.selected = pick;
+            }
+            if let Some(v) = put {
+                s.put(v);
+                if s.won() {
+                    self.game_line = game::line(i18n::lines().sudoku_won, self.rand01(), "");
+                    voice::say(&self.game_line, voice::Mode::Chatter);
+                    self.sparkle_at = t;
+                }
+            }
+        }
+        if again {
+            self.start_sudoku();
+        }
+        if close {
+            self.sudoku = None;
+        }
     }
 
     /// The popup beside her, on whichever side has more room.
@@ -554,6 +657,10 @@ impl App {
             }
             if ui.button(text.play_with_me).clicked() {
                 self.start_game();
+                close = true;
+            }
+            if ui.button(text.sudoku).clicked() {
+                self.start_sudoku();
                 close = true;
             }
             if ui.button(text.what_can_i_do).clicked() {
@@ -886,7 +993,7 @@ impl eframe::App for App {
         }
         // Working with nothing to say (Claude thinking, rewrite not back yet): a general line that expires after
         // FILLER_EVERY, so the next frame swaps in another until real activity or the reply arrives.
-        if self.pose == Pose::Working && self.bubble.is_none() && self.game.is_none() && !self.game_loading && self.tour.is_none() {
+        if self.pose == Pose::Working && self.bubble.is_none() && !self.playing() && self.tour.is_none() {
             let lines = i18n::lines().working;
             let next = (self.filler + 1 + (self.rand01() * (lines.len() - 1) as f32) as usize) % lines.len(); // never the same twice
             self.filler = next;
@@ -915,7 +1022,7 @@ impl eframe::App for App {
             p => p,
         };
         // The game takes her bubble space while open, except when Claude needs your OK.
-        let game_shown = (self.game.is_some() || self.game_loading) && self.pose != Pose::Waiting;
+        let game_shown = self.playing() && self.pose != Pose::Waiting;
         if game_shown {
             pose = match &self.game {
                 Some(g) if g.won() => Pose::Pouty,
@@ -962,7 +1069,7 @@ impl eframe::App for App {
             self.music = Some(true);
         }
         // Idle with nothing on screen for a while: sparkle and offer to help. Not while music plays: that's chill time.
-        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.game.is_some() || self.game_loading {
+        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.playing() {
             self.nudge_at = t + IDLE_NUDGE;
         } else if t > self.nudge_at {
             let line = { let l = i18n::lines().idle; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
@@ -1238,7 +1345,10 @@ impl eframe::App for App {
             self.playlist_open = false;
         }
 
-        if game_shown {
+        if game_shown && self.sudoku.is_some() {
+            self.sudoku_panel(ui, painter, anchor, t);
+            list_shown = true;
+        } else if game_shown {
             // Her line, the hint, the word, the A-Z grid, then hearts and buttons.
             let w = WIDTH - 40.0;
             let panel = Rect::from_min_size(anchor - vec2(w / 2.0, 222.0), vec2(w, 220.0));
