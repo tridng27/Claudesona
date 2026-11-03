@@ -1,19 +1,21 @@
 #![cfg_attr(windows, windows_subsystem = "windows")] // no console window behind her on Windows
 // Claudesona: a desktop mascot that mirrors Claude Code's work. Behaviour is specified in SPEC.md.
-// Drag to move, click to poke, right-click to quit.
+// Drag to move, click to poke, right-click for the menu and chat.
 mod anim;
+mod chat;
 mod cli;
 mod game;
 mod i18n;
 mod log;
 mod music;
 mod rewrite;
+mod voice;
 #[cfg_attr(windows, path = "os_windows.rs")]
 #[cfg_attr(not(windows), path = "os_unix.rs")]
 mod os; // the few OS calls eframe doesn't cover
 
 use anim::Pose;
-use eframe::egui::{self, Color32, FontId, Mesh, Painter, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2, ViewportCommand, pos2, vec2};
+use eframe::egui::{self, Color32, FontId, Key, Mesh, Painter, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2, ViewportCommand, ViewportId, pos2, vec2};
 use log::Event;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::io::Read;
@@ -28,6 +30,11 @@ const GRID: (usize, usize) = (24, 36);
 const WIDTH: f32 = 340.0;
 const BUBBLE_ROOM: f32 = 240.0; // space above her head for the speech bubble (and the music player)
 const MINI: f32 = 0.42; // mini height relative to hers
+const POPUP_W: f32 = 270.0; // right-click popup width
+const POPUP_SLIDE: f32 = 28.0; // points the popup slides out from her
+const POPUP_IN: f32 = 0.18; // seconds the popup takes to slide and fade in
+const FILLER_EVERY: f32 = 3.0; // seconds each general working line shows
+const FINISHED_FLASH: f32 = 2.5; // seconds of Waiting pose when work is confirmed finished
 const REWRITE_TIMEOUT: f32 = 30.0;
 const CREAM: Color32 = Color32::from_rgb(0xFB, 0xF4, 0xEA);
 const CORAL: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
@@ -39,6 +46,7 @@ const MUSIC_AFTER: f32 = 300.0; // idle seconds before she puts music on by hers
 // "What can I do": she shows each phase in its pose while explaining it.
 const TOUR_STEP: f32 = 6.5; // seconds per step
 const WORK_MUSIC_KEY: &str = "work_music"; // eframe storage key for the "While working" choice
+const VOICE_KEY: &str = "voice"; // her voice on or off
 const MUSIC_MODE_KEY: &str = "music_mode"; // Loop / Loop 1 / Shuffle
 const PLAYLIST_KEY: &str = "playlist"; // name of the playlist to play
 const LANG_KEY: &str = "lang"; // EN or VI
@@ -47,6 +55,8 @@ enum Msg {
     Log(PathBuf, Event),
     Rewritten { short: String, long: Option<String> },
     Game { word: String, hint: String }, // a new hangman word from Haiku
+    Chat(Option<(String, Option<String>)>), // her answer to your chat message (None: `claude` failed)
+    Partial { chat: bool, short: String }, // the short answer so far, streaming in (chat, or a reply rewrite)
     Hook(serde_json::Value), // from `claudesona hook`, or {"quit":true} from install/uninstall
 }
 
@@ -63,6 +73,25 @@ struct Bubble {
     expanded: bool,
     hide_at: f32,
     is_label: bool, // activity label rather than speech
+}
+
+/// The right-click popup: a separate window beside her, so it can sit outside her own window and take
+/// keyboard focus for the chat box (hers never does).
+struct Popup {
+    her: Rect,     // her body on screen when it opened, in points
+    work: Rect,    // the desktop area it must stay inside
+    left: bool,    // she's on the right half of the screen, so it opens to her left
+    size: Vec2,    // measured last frame
+    input: String, // the chat box
+    frames: u32,
+    opened: f32, // when it opened, for the slide-and-fade in
+    had_focus: bool,
+    memories: bool,       // the memory list is open
+    confirm_forget: bool, // "Forget everything" was clicked once
+    voice_setup: bool,    // the "my own voice" fields are open
+    voice_id: String,
+    voice_key: String,    // used once to make the voice, never saved
+    confirm_reset: bool,  // "Back to her default voice" was clicked once
 }
 
 struct Mini {
@@ -231,6 +260,12 @@ struct App {
     game_loading: bool,
     recent_words: Vec<String>,  // so new rounds don't repeat
     game_line: String, // what she's saying in the game panel
+    popup: Option<Popup>,
+    chat_pending: bool,
+    last_reply: String, // Claude's last reply, plain, so chat knows what just happened
+    finished_at: f32,   // when Claude's work was last confirmed finished: she shows Waiting briefly
+    voice_on: bool,     // remembered
+    filler: usize,      // the working line she said last
 }
 
 impl App {
@@ -267,6 +302,8 @@ impl App {
             sprite("game_pouty", "", "poke"),
         ];
 
+        std::thread::spawn(chat::preload); // memory.json and the embedding model, off the UI thread
+        std::thread::spawn(voice::init);
         let (outbox, inbox) = channel();
         let tx = outbox.clone();
         let wake = ctx.clone();
@@ -293,6 +330,8 @@ impl App {
         let music_mode = saved(MUSIC_MODE_KEY).and_then(|m| music::Mode::from_label(&m)).unwrap_or(music::Mode::Shuffle);
         let playlist_name = saved(PLAYLIST_KEY).unwrap_or_else(|| music::BUILT_IN.to_string());
         music::set_mode(music_mode);
+        let voice_on = saved(VOICE_KEY).is_none_or(|v| v == "true");
+        voice::set_on(voice_on);
         let lang = saved(LANG_KEY).and_then(|l| i18n::Lang::from_code(&l)).unwrap_or(i18n::Lang::En);
         i18n::set(lang);
         music::select(&playlist_name);
@@ -337,6 +376,12 @@ impl App {
             game_loading: false,
             recent_words: vec![],
             game_line: String::new(),
+            popup: None,
+            chat_pending: false,
+            last_reply: String::new(),
+            finished_at: -99.0,
+            voice_on,
+            filler: 0,
         }
     }
 
@@ -346,14 +391,15 @@ impl App {
         self.ctx.set_zoom_factor(z);
         // The new zoom only lands next frame, so these commands are still in old-zoom points.
         let size = window_size() * z / old;
-        self.ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-        if let Some(outer) = self.ctx.input(|i| i.viewport().outer_rect) {
+        // Called from the popup too, so name her window: plain commands would go to the popup.
+        self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(size));
+        if let Some(outer) = self.ctx.input_for(ViewportId::ROOT, |i| i.viewport().outer_rect) {
             let feet = outer.min + vec2(outer.width() / 2.0, outer.height());
             let mut pos = feet - size * vec2(0.5, 1.0);
             if let Some(work) = os::work_area(self.hwnd).map(|w| w / old) {
                 pos = pos.min(work.max - size).max(work.min); // a bigger her mustn't spill off screen
             }
-            self.ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+            self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::OuterPosition(pos));
         }
     }
 
@@ -365,6 +411,7 @@ impl App {
     }
 
     fn say(&mut self, short: String, long: Option<String>, t: f32) {
+        voice::say(&short, voice::Mode::Chatter); // only her recorded lines; replies and chat speak live (see say_live)
         let hide_at = t + 8.0 + short.chars().count() as f32 / 12.0; // roughly reading time
         self.bubble = Some(Bubble { short, long, expanded: false, hide_at, is_label: false });
     }
@@ -373,9 +420,18 @@ impl App {
         self.bubble = Some(Bubble { short: text, long: None, expanded: false, hide_at: t + 120.0, is_label: true });
     }
 
-    /// Her pose once Claude's turn is over: still working while a background command runs.
+    /// Her pose once Claude's turn is over: still working while a background command or agent runs.
     fn rest(&self) -> Pose {
-        if self.shells.is_empty() { Pose::Idle } else { Pose::Working }
+        if self.shells.is_empty() && self.minis.iter().all(|m| m.done_at.is_some()) { Pose::Idle } else { Pose::Working }
+    }
+
+    /// Back to her resting pose. Work going to Idle is confirmed finished: she shows Waiting briefly (your turn).
+    fn settle(&mut self, t: f32) {
+        let was = self.pose;
+        self.pose = self.rest();
+        if was != Pose::Idle && self.pose == Pose::Idle {
+            self.finished_at = t;
+        }
     }
 
     fn set_music(&mut self, on: bool, t: f32) {
@@ -395,11 +451,233 @@ impl App {
     fn start_game(&mut self) {
         (self.game, self.game_loading, self.tour) = (None, true, None);
         self.game_line = game::line(i18n::lines().thinking, self.rand01(), "");
+        voice::say(&self.game_line, voice::Mode::Chatter);
         let (tx, wake, avoid) = (self.outbox.clone(), self.ctx.clone(), self.recent_words.clone());
         let seed = (self.rand01() * 1_000_000.0) as u32;
         std::thread::spawn(move || {
             let (word, hint) = game::new_word(seed, &avoid);
             let _ = tx.send(Msg::Game { word, hint });
+            wake.request_repaint();
+        });
+    }
+
+    /// The popup beside her, on whichever side has more room.
+    fn open_popup(&self, body: Rect, t: f32) -> Option<Popup> {
+        let inner = self.ctx.input(|i| i.viewport().inner_rect)?;
+        let her = body.translate(inner.min.to_vec2());
+        let work = os::work_area(self.hwnd)
+            .map(|w| w / self.ctx.zoom_factor())
+            .or_else(|| self.ctx.input(|i| i.viewport().monitor_size).map(|m| Rect::from_min_size(Pos2::ZERO, m)))
+            .unwrap_or(Rect::EVERYTHING);
+        let left = her.center().x > work.center().x;
+        rewrite::prewarm(chat::persona()); // you'll likely type: have Haiku ready
+        Some(Popup { her, work, left, size: vec2(POPUP_W, 360.0), input: String::new(), frames: 0, opened: t, had_focus: false, memories: false, confirm_forget: false, voice_setup: false, voice_id: String::new(), voice_key: String::new(), confirm_reset: false })
+    }
+
+    fn show_popup(&mut self, ctx: &egui::Context, t: f32) {
+        let Some(p) = &self.popup else { return };
+        let x = if p.left { p.her.left() - p.size.x - 6.0 } else { p.her.right() + 6.0 };
+        let x = x.min(p.work.right() - p.size.x).max(p.work.left());
+        // Slides out from her side: starts POPUP_SLIDE closer to her and eases out to its place.
+        let k = popup_in(t - p.opened);
+        let x = x + (1.0 - k) * POPUP_SLIDE * if p.left { 1.0 } else { -1.0 };
+        let y = (p.her.bottom() - p.size.y).min(p.work.bottom() - p.size.y).max(p.work.top());
+        let builder = egui::ViewportBuilder::default()
+            .with_title("Claudesona")
+            .with_position(pos2(x, y))
+            .with_inner_size(p.size)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_has_shadow(false)
+            .with_always_on_top()
+            .with_resizable(false)
+            .with_taskbar(false);
+        ctx.show_viewport_immediate(ViewportId::from_hash_of("popup"), builder, |ui, _| self.popup_ui(ui, t));
+    }
+
+    /// The menu, the chat box and her memories. Runs inside the popup's own window.
+    fn popup_ui(&mut self, ui: &mut egui::Ui, t: f32) {
+        let Some(mut p) = self.popup.take() else { return };
+        let text = i18n::ui();
+        let ctx = ui.ctx().clone();
+        let (focused, esc, close_asked) = ui.input(|i| (i.viewport().focused, i.key_pressed(Key::Escape), i.viewport().close_requested()));
+        if p.frames == 0 {
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+        }
+        p.had_focus |= focused == Some(true);
+        // Clicking anywhere else takes its focus away: that closes it, like a normal menu.
+        let mut close = esc || close_asked || (p.had_focus && focused == Some(false));
+        *ui.visuals_mut() = egui::Visuals::light();
+        ui.visuals_mut().override_text_color = Some(INK);
+        let k = popup_in(t - p.opened);
+        ui.set_opacity(k);
+        if k < 1.0 {
+            ctx.request_repaint();
+        }
+        let frame = egui::Frame::new().fill(CREAM).stroke(Stroke::new(2.0, CORAL)).corner_radius(10).inner_margin(10);
+        let shown = frame.show(ui, |ui| {
+            ui.set_width(POPUP_W - 24.0);
+            ui.horizontal(|ui| {
+                ui.label(text.size);
+                for (name, z) in SIZES {
+                    if ui.selectable_label(ctx.zoom_factor() == z, name).clicked() {
+                        self.set_zoom(z);
+                        close = true;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(text.language);
+                for lang in [i18n::Lang::En, i18n::Lang::Vi] {
+                    if ui.selectable_label(self.lang == lang, lang.code()).clicked() {
+                        self.lang = lang;
+                        i18n::set(lang);
+                    }
+                }
+            });
+            if ui.button(if self.music.is_some() { text.stop_music } else { text.play_music }).clicked() {
+                self.set_music(self.music.is_none(), t);
+                close = true;
+            }
+            ui.horizontal(|ui| {
+                ui.label(text.while_working);
+                if ui.selectable_label(!self.work_music, text.working).clicked() {
+                    self.work_music = false;
+                }
+                if ui.selectable_label(self.work_music, text.music).clicked() {
+                    self.work_music = true;
+                }
+            });
+            if ui.button(text.open_music_folder).clicked() {
+                open_music_folder();
+                close = true;
+            }
+            if ui.button(text.play_with_me).clicked() {
+                self.start_game();
+                close = true;
+            }
+            if ui.button(text.what_can_i_do).clicked() {
+                self.tour = Some((t, usize::MAX));
+                close = true;
+            }
+            if ui.button(text.hide).clicked() {
+                self.hidden_until = t + 600.0;
+                close = true;
+            }
+            if ui.button(text.quit).clicked() {
+                ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+            }
+
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut self.voice_on, text.voice).changed() {
+                    voice::set_on(self.voice_on);
+                }
+                if ui.selectable_label(p.voice_setup, text.my_voice).clicked() {
+                    p.voice_setup = !p.voice_setup;
+                }
+            });
+            if p.voice_setup {
+                // The key is saved next to the exe: live speech (replies, chat) needs it every time.
+                ui.horizontal(|ui| {
+                    if voice::has_key() {
+                        ui.label(text.key_saved);
+                        if ui.button(text.forget_key).clicked() {
+                            voice::save_key("");
+                        }
+                    } else {
+                        ui.add(egui::TextEdit::singleline(&mut p.voice_key).hint_text(text.api_key_hint).password(true).desired_width(150.0));
+                        if ui.button(text.save_key).clicked() {
+                            voice::save_key(&std::mem::take(&mut p.voice_key));
+                        }
+                    }
+                });
+                ui.add(egui::TextEdit::singleline(&mut p.voice_id).hint_text(text.voice_id_hint).desired_width(f32::INFINITY));
+                let chars: usize = i18n::voiced().iter().map(|(l, _)| voice::spoken(l).chars().count()).sum();
+                if ui.add_enabled(voice::has_key(), egui::Button::new(text.make_voice.replace("{n}", &chars.to_string()))).clicked() {
+                    voice::make_custom(p.voice_id.clone());
+                }
+                if voice::custom() && ui.button(if p.confirm_reset { text.forget_sure } else { text.default_voice }).clicked() {
+                    if p.confirm_reset {
+                        voice::reset_custom();
+                    }
+                    p.confirm_reset = !p.confirm_reset;
+                }
+                let progress = voice::progress();
+                if !progress.is_empty() {
+                    ui.label(RichText::new(progress).small().color(SOFT_INK));
+                }
+            }
+
+            ui.separator();
+            let facts = chat::facts();
+            ui.horizontal(|ui| {
+                if ui.selectable_label(p.memories, format!("{} ({})", text.memories, facts.len())).clicked() {
+                    p.memories = !p.memories;
+                }
+                // Two clicks, because it can't be undone.
+                if ui.button(if p.confirm_forget { text.forget_sure } else { text.forget_all }).clicked() {
+                    if p.confirm_forget {
+                        chat::forget_all();
+                    }
+                    p.confirm_forget = !p.confirm_forget;
+                }
+            });
+            if p.memories {
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    for (id, fact, links) in &facts {
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.small_button("✕").clicked() {
+                                chat::forget(*id);
+                            }
+                            ui.label(fact);
+                        });
+                        for l in links {
+                            ui.label(RichText::new(format!("    {l}")).small().color(SOFT_INK));
+                        }
+                    }
+                });
+            }
+            let hint = if self.chat_pending { text.chat_thinking } else { text.chat_hint };
+            let edit = ui.add(egui::TextEdit::singleline(&mut p.input).hint_text(hint).desired_width(f32::INFINITY));
+            if p.frames == 0 {
+                edit.request_focus();
+            }
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !p.input.trim().is_empty() && !self.chat_pending {
+                self.send_chat(p.input.trim().to_string(), t);
+                close = true;
+            }
+        });
+        // Fit the window to what was drawn; the new size lands next frame.
+        let size = vec2(POPUP_W, shown.response.rect.height().ceil());
+        if (size - p.size).length() > 0.5 {
+            p.size = size;
+            ctx.request_repaint();
+        }
+        p.frames += 1;
+        if !close {
+            self.popup = Some(p);
+        }
+    }
+
+    /// Sends your chat message to Haiku on a worker thread, with what Claude is doing right now.
+    fn send_chat(&mut self, msg: String, t: f32) {
+        self.chat_pending = true;
+        self.label(i18n::ui().chat_thinking.into(), t);
+        let doing = match (self.pose, &self.bubble) {
+            (Pose::Waiting, _) => "Waiting for the user to answer a permission prompt or question.".to_string(),
+            (Pose::Working, Some(b)) if b.is_label => format!("Working: {}", b.short),
+            (Pose::Working, _) => "Working on the user's request.".to_string(),
+            _ => "Nothing right now: idle.".to_string(),
+        };
+        let work = if self.last_reply.is_empty() { doing } else { format!("{doing}\nClaude's last reply: {}", self.last_reply) };
+        let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let partial = |short: &str| {
+                let _ = tx.send(Msg::Partial { chat: true, short: short.to_string() });
+                wake.request_repaint();
+            };
+            let answer = chat::reply(&msg, &work, partial);
+            let _ = tx.send(Msg::Chat(answer));
             wake.request_repaint();
         });
     }
@@ -413,7 +691,8 @@ impl App {
             Msg::Rewritten { short, long } => {
                 // A rewrite that arrives after the timeout already showed the plain reply: drop it.
                 if self.pending_reply.take().is_some() {
-                    self.pose = self.rest();
+                    self.settle(t);
+                    voice::say_live(&short, false); // when her voice is charged
                     self.say(short, long, t);
                 }
                 return;
@@ -425,8 +704,22 @@ impl App {
                         self.recent_words.remove(0);
                     }
                     self.game_line = game::line(i18n::lines().start, self.rand01(), "");
+                    voice::say(&self.game_line, voice::Mode::Chatter);
                     (self.game, self.game_loading) = (Some(game::Game::new(word, hint)), false);
                 }
+                return;
+            }
+            Msg::Partial { chat, short } => {
+                if (chat && self.chat_pending) || (!chat && self.pending_reply.is_some()) {
+                    self.say(short, None, t);
+                }
+                return;
+            }
+            Msg::Chat(answer) => {
+                self.chat_pending = false;
+                let (short, long) = answer.unwrap_or_else(|| (i18n::ui().chat_failed.to_string(), None));
+                voice::say_live(&short, true); // you're talking to her: always
+                self.say(short, long, t);
                 return;
             }
             Msg::Hook(v) => {
@@ -438,22 +731,31 @@ impl App {
                 let notified = v["notification_type"] == "permission_prompt" || v["message"].as_str().is_some_and(|m| m.contains("permission"));
                 let followed = self.session.as_ref().is_none_or(|p| p.file_stem().is_some_and(|s| v["session_id"] == *s.to_string_lossy()));
                 // A shell command is starting. Its log line only comes after it finishes.
-                if v["hook_event_name"] == "PreToolUse" && followed && !(self.pose == Pose::Waiting && t - self.waiting_since < 2.0) {
+                // Claude asking you a question waits on you just like a permission prompt.
+                let asking = v["hook_event_name"] == "PreToolUse" && v["tool_name"] == "AskUserQuestion" && followed;
+                if v["hook_event_name"] == "PreToolUse" && !asking && followed && !(self.pose == Pose::Waiting && t - self.waiting_since < 2.0) {
                     self.pose = Pose::Working;
                     self.label(log::tool_label(v["tool_name"].as_str().unwrap_or(""), &v["tool_input"]), t);
                 }
                 // Claude Code is closing, which stops its background commands.
+                // Its unfinished agents stop too. She says goodbye with a brief Waiting pose.
                 if v["hook_event_name"] == "SessionEnd" && followed {
                     self.shells.clear();
-                    if self.pending_reply.is_none() && self.pose == Pose::Working {
-                        self.pose = Pose::Idle;
-                        self.bubble = None;
+                    self.minis.retain(|m| m.done_at.is_some());
+                    if self.pending_reply.is_none() && self.pose != Pose::Waiting {
+                        (self.pose, self.finished_at) = (Pose::Idle, t);
+                        let line = { let l = i18n::lines().bye; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+                        self.say(line.into(), None, t - 4.0);
                     }
                 }
-                if v["hook_event_name"] == "PermissionRequest" || (v["hook_event_name"] == "Notification" && notified) {
+                if asking || v["hook_event_name"] == "PermissionRequest" || (v["hook_event_name"] == "Notification" && notified) {
+                    let fresh = self.pose != Pose::Waiting; // the later Notification backup doesn't call out again
                     self.pose = Pose::Waiting;
                     self.waiting_since = t;
                     self.waiting_line = { let l = i18n::lines().waiting; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+                    if fresh {
+                        voice::say(self.waiting_line, voice::Mode::Attention); // out loud, always: Claude needs you
+                    }
                     self.say(self.waiting_line.into(), None, t + 600.0); // stays until Claude moves on
                 }
                 return;
@@ -491,6 +793,7 @@ impl App {
     fn apply(&mut self, ev: Event, t: f32) {
         match ev {
             Event::Prompt => {
+                rewrite::prewarm(rewrite::persona()); // ready for this turn's reply
                 self.pose = Pose::Working;
                 self.bubble = None;
                 self.pending_reply = None;
@@ -506,10 +809,18 @@ impl App {
                 }
             }
             Event::Reply(text) => {
+                if self.bubble.as_ref().is_some_and(|b| b.is_label) {
+                    self.bubble = None; // the last activity is stale: working lines fill in until the rewrite streams
+                }
+                self.last_reply = log::clean(&text, 300);
                 self.pending_reply = Some((text.clone(), t));
                 let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
                 std::thread::spawn(move || {
-                    let (short, long) = rewrite::rewrite(&text).unwrap_or_else(|| (log::clean(&text, 160), None));
+                    let partial = |short: &str| {
+                        let _ = tx.send(Msg::Partial { chat: false, short: short.to_string() });
+                        wake.request_repaint();
+                    };
+                    let (short, long) = rewrite::rewrite(&text, partial).unwrap_or_else(|| (log::clean(&text, 160), None));
                     let _ = tx.send(Msg::Rewritten { short, long });
                     wake.request_repaint();
                 });
@@ -518,7 +829,7 @@ impl App {
             Event::ShellDone(id) => self.shells.retain(|s| *s != id),
             Event::TurnEnd => {
                 if self.pending_reply.is_none() {
-                    self.pose = self.rest();
+                    self.settle(t);
                     if self.bubble.as_ref().is_some_and(|b| b.is_label) {
                         self.bubble = None;
                     }
@@ -546,6 +857,7 @@ impl eframe::App for App {
     // eframe calls this every 30s and on exit, next to the window position and size it already saves.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(WORK_MUSIC_KEY, self.work_music.to_string());
+        storage.set_string(VOICE_KEY, self.voice_on.to_string());
         storage.set_string(MUSIC_MODE_KEY, self.music_mode.label().to_string());
         storage.set_string(PLAYLIST_KEY, self.playlist_name.clone());
         storage.set_string(LANG_KEY, self.lang.code().to_string());
@@ -566,11 +878,23 @@ impl eframe::App for App {
         {
             let plain = log::clean(text, 160);
             self.pending_reply = None;
-            self.pose = self.rest();
+            self.settle(t);
             self.say(plain, None, t);
         }
         if self.bubble.as_ref().is_some_and(|b| t > b.hide_at) {
             self.bubble = None;
+        }
+        // Working with nothing to say (Claude thinking, rewrite not back yet): a general line that expires after
+        // FILLER_EVERY, so the next frame swaps in another until real activity or the reply arrives.
+        if self.pose == Pose::Working && self.bubble.is_none() && self.game.is_none() && !self.game_loading && self.tour.is_none() {
+            let lines = i18n::lines().working;
+            let next = (self.filler + 1 + (self.rand01() * (lines.len() - 1) as f32) as usize) % lines.len(); // never the same twice
+            self.filler = next;
+            self.label(lines[next].into(), t);
+            voice::say(lines[next], voice::Mode::Chatter); // uses her charge: one every ~30s while working
+            if let Some(b) = &mut self.bubble {
+                b.hide_at = t + FILLER_EVERY;
+            }
         }
         self.minis.retain(|m| m.done_at.is_none_or(|d| t - d < 2.0));
         // Hidden: keep following Claude, but draw nothing and let every click through.
@@ -599,6 +923,9 @@ impl eframe::App for App {
                 _ => Pose::Excited,
             };
         }
+        if self.pose == Pose::Idle && t - self.finished_at < FINISHED_FLASH && !game_shown {
+            pose = Pose::Waiting;
+        }
         if poke_t.is_some() {
             pose = Pose::Poke;
         }
@@ -610,6 +937,7 @@ impl eframe::App for App {
                 pose = *tour_pose;
                 if step != said {
                     self.tour = Some((start, step));
+                    voice::say(line, voice::Mode::Tour);
                     if step == 3 || step == tour.len() - 1 {
                         self.sparkle_at = t;
                     }
@@ -704,63 +1032,14 @@ impl eframe::App for App {
             os::focus(self.terminal);
         }
         self.hit_rects.clear();
+        if resp.drag_started() {
+            self.popup = None;
+        }
+        if resp.secondary_clicked() {
+            self.popup = if self.popup.is_some() { None } else { self.open_popup(body, t) };
+        }
+        self.show_popup(&ctx, t);
         let text = i18n::ui();
-        let menu = resp.context_menu(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(text.size);
-                for (name, z) in SIZES {
-                    if ui.selectable_label(ctx.zoom_factor() == z, name).clicked() {
-                        self.set_zoom(z);
-                        ui.close();
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(text.language);
-                for lang in [i18n::Lang::En, i18n::Lang::Vi] {
-                    if ui.selectable_label(self.lang == lang, lang.code()).clicked() {
-                        self.lang = lang;
-                        i18n::set(lang);
-                        ui.close();
-                    }
-                }
-            });
-            if ui.button(if self.music.is_some() { text.stop_music } else { text.play_music }).clicked() {
-                self.set_music(self.music.is_none(), t);
-                ui.close();
-            }
-            ui.horizontal(|ui| {
-                ui.label(text.while_working);
-                if ui.selectable_label(!self.work_music, text.working).clicked() {
-                    self.work_music = false;
-                    ui.close();
-                }
-                if ui.selectable_label(self.work_music, text.music).clicked() {
-                    self.work_music = true;
-                    ui.close();
-                }
-            });
-            if ui.button(text.open_music_folder).clicked() {
-                open_music_folder();
-                ui.close();
-            }
-            if ui.button(text.play_with_me).clicked() {
-                self.start_game();
-                ui.close();
-            }
-            if ui.button(text.what_can_i_do).clicked() {
-                self.tour = Some((t, usize::MAX));
-                ui.close();
-            }
-            if ui.button(text.hide).clicked() {
-                self.hidden_until = t + 600.0;
-                ui.close();
-            }
-            if ui.button(text.quit).clicked() {
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-            }
-        });
-        self.hit_rects.extend(menu.map(|m| m.response.rect));
 
         let painter = ui.painter();
         let sprite = &self.sprites[pose as usize];
@@ -783,6 +1062,11 @@ impl eframe::App for App {
         }
         // Positions are fractions of her canvas: beside her head, clear of her hair.
         let at = |fx: f32, fy: f32| pos2(body.left() + body.width() * fx, body.top() + body.height() * fy);
+        if voice::ready() {
+            // Her voice is charged: sound waves pulse out from both sides of her head until she speaks.
+            sound_waves(painter, at(0.86, 0.24), 1.0, t);
+            sound_waves(painter, at(0.14, 0.24), -1.0, t);
+        }
         if pose == Pose::Working {
             // Two sweat drops, half a cycle apart, each sliding down and fading.
             for (i, (fx, fy)) in [(0.84, 0.13), (0.15, 0.20)].into_iter().enumerate() {
@@ -1028,6 +1312,7 @@ impl eframe::App for App {
                         i18n::lines().miss
                     };
                     self.game_line = game::line(lines, r, &g.word);
+                    voice::say(&self.game_line, voice::Mode::Chatter);
                 }
             }
             if again {
@@ -1058,6 +1343,11 @@ impl eframe::App for App {
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
+}
+
+/// How far the popup's entrance has got (0 to 1), eased out so it settles softly.
+fn popup_in(since: f32) -> f32 {
+    1.0 - (1.0 - (since / POPUP_IN).clamp(0.0, 1.0)).powi(3)
 }
 
 /// A four-point star: two long strokes, two short diagonals and a bright center.
@@ -1148,6 +1438,19 @@ fn music_note(painter: &Painter, at: Pos2, alpha: f32) {
 }
 
 /// An anime sweat drop: a circle of radius `r` at `c` with a point on top.
+/// Three arcs opening sideways (`dir` 1 right, -1 left) that light up outward in turn, like a sound coming.
+fn sound_waves(painter: &Painter, c: Pos2, dir: f32, t: f32) {
+    for i in 0..3 {
+        let r = 5.0 + i as f32 * 5.0;
+        let glow = 0.5 + 0.5 * (t * 4.0 - i as f32 * 0.9).sin();
+        let points: Vec<Pos2> = (0..=8).map(|k| {
+            let a = -0.7 + 1.4 * k as f32 / 8.0;
+            c + vec2(dir * r * a.cos(), r * a.sin())
+        }).collect();
+        painter.add(egui::Shape::line(points, Stroke::new(2.2, CORAL.gamma_multiply(0.25 + 0.75 * glow))));
+    }
+}
+
 fn sweat_drop(painter: &Painter, c: Pos2, r: f32, alpha: f32) {
     // The tip is 2r above the center, so its tangents touch the circle at -30° and 210°.
     let mut pts = vec![c - vec2(0.0, 2.0 * r)];
@@ -1187,6 +1490,13 @@ fn main() -> eframe::Result {
         Some("hook") => return Ok(cli::hook()),
         Some("install") => return Ok(cli::report(cli::install())),
         Some("uninstall") => return Ok(cli::report(cli::uninstall())),
+        // For the developer: make the bundled voice into assets/voice/ (key from ELEVENLABS_API_KEY), then rebuild.
+        Some("voices") => {
+            let id = std::env::args().nth(2).unwrap_or_default();
+            let key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+            let dir = std::env::current_dir().unwrap_or_default().join("assets").join("voice");
+            return Ok(cli::report(voice::generate(&key, &id, &dir).map(|n| format!("Made {n} new lines in {}. Rebuild to bundle them.", dir.display()))));
+        }
         _ => {}
     }
     // Port taken: she's already running.

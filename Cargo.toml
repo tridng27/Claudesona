@@ -8,6 +8,8 @@ eframe = { version = "0.37.0", features = ["glow", "persistence"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 serde_json = { version = "1", features = ["preserve_order"] } # keep the user's settings.json key order
 raw-window-handle = "0.6"
+model2vec-rs = { version = "0.4", default-features = false } # her memory's embeddings; model downloaded on first chat
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] } # pure-Rust regex for model2vec (onig and esaxx need a C toolchain per target)
 rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] } # audio everywhere: her songs and your files
 
 [target.'cfg(windows)'.dependencies]

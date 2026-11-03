@@ -8,6 +8,8 @@ use std::time::Duration;
 
 const RATE: usize = 22_050;
 const BARS: usize = 32; // 1:30 to 2:00 per track
+// Her voice sits under the music, never over it: the mp3s peak near full scale, the music around 0.6.
+const VOICE_VOLUME: f32 = 0.3;
 
 // Chords as MIDI notes, root first.
 const FMAJ_EM_DM_CMAJ: [&[f32]; 4] = [&[53., 57., 60., 64.], &[52., 55., 59., 62.], &[50., 53., 57., 60.], &[48., 52., 55., 59.]];
@@ -86,6 +88,60 @@ const MOONLIT: [&[(f32, f32, f32)]; 8] = [
     &[(0.0, 74.0, 2.0), (2.0, 71.0, 1.0), (3.0, 69.0, 1.0)],
 ];
 const BBMAJ_AM_GM_FMAJ: [&[f32]; 4] = [&[46., 50., 53., 57.], &[45., 48., 52., 55.], &[43., 46., 50., 53.], &[53., 57., 60., 64.]];
+// Keys for the second batch: F (ii-V-I-vi), D, A minor and Ab. These four are lighter, sharper and faster than the first six:
+// brighter filter (warmth 0.6+), 82-88 BPM, no tape wobble or kick pump.
+const GM7_C9_FMAJ7_DM7: [&[f32]; 4] = [&[55., 58., 62., 65.], &[48., 52., 55., 58., 62.], &[53., 57., 60., 64.], &[50., 53., 57., 60.]];
+const BBMAJ7_AM7_GM7_C7: [&[f32]; 4] = [&[46., 50., 53., 57.], &[45., 48., 52., 55.], &[43., 46., 50., 53.], &[48., 52., 55., 58.]];
+const DMAJ7_BM7_EM7_A7: [&[f32]; 4] = [&[50., 54., 57., 61.], &[47., 50., 54., 57.], &[52., 55., 59., 62.], &[45., 49., 52., 55.]];
+const GMAJ7_FSM7_EM7_A7SUS: [&[f32]; 4] = [&[55., 59., 62., 66.], &[54., 57., 61., 64.], &[52., 55., 59., 62.], &[45., 50., 52., 55.]];
+const AM9_FMAJ7_DM7_E7: [&[f32]; 4] = [&[45., 48., 52., 55., 59.], &[53., 57., 60., 64.], &[50., 53., 57., 60.], &[52., 56., 59., 62.]];
+const FMAJ7_G6_EM7_AM7: [&[f32]; 4] = [&[53., 57., 60., 64.], &[55., 59., 62., 64.], &[52., 55., 59., 62.], &[45., 48., 52., 55.]];
+const ABMAJ7_GM7_FM7_BB7: [&[f32]; 4] = [&[44., 48., 51., 55.], &[43., 46., 50., 53.], &[41., 44., 48., 51.], &[46., 50., 53., 56.]];
+const EBMAJ7_CM7_FM7_BB7: [&[f32]; 4] = [&[51., 55., 58., 62.], &[48., 51., 55., 58.], &[41., 44., 48., 51.], &[46., 50., 53., 56.]];
+// "Library Window Light" over Gm7 C9 Fmaj7 Dm7: "pages turning slowly / dust in golden light / I could stay here all day / reading through the night".
+const LIBRARY_TUNE: [&[(f32, f32, f32)]; 8] = [
+    &[(0.5, 70.0, 0.5), (1.0, 69.0, 0.5), (1.5, 67.0, 0.5), (2.0, 70.0, 1.0), (3.0, 74.0, 1.0)],
+    &[(0.0, 72.0, 1.5), (1.5, 70.0, 0.5), (2.0, 67.0, 1.5)],
+    &[(0.5, 69.0, 0.5), (1.0, 72.0, 0.5), (1.5, 76.0, 1.0), (2.5, 74.0, 0.5), (3.0, 72.0, 1.0)],
+    &[(0.0, 69.0, 2.5)],
+    &[(0.0, 74.0, 1.0), (1.0, 77.0, 0.5), (1.5, 74.0, 0.5), (2.0, 70.0, 1.5)],
+    &[(0.5, 72.0, 0.5), (1.0, 74.0, 0.5), (1.5, 72.0, 0.5), (2.0, 70.0, 0.5), (2.5, 67.0, 1.5)],
+    &[(0.0, 69.0, 0.5), (0.5, 72.0, 0.5), (1.0, 76.0, 1.0), (2.0, 77.0, 0.5), (2.5, 76.0, 0.5), (3.0, 74.0, 1.0)],
+    &[(0.0, 72.0, 1.0), (1.0, 69.0, 2.5)],
+];
+// "Cat Nap Afternoon" over Dmaj7 Bm7 Em7 A7: "curled up in the sunlight / purring through the day / nothing on my mind now / let the hours drift away".
+const CAT_NAP: [&[(f32, f32, f32)]; 8] = [
+    &[(0.0, 73.0, 0.5), (0.5, 74.0, 0.5), (1.0, 78.0, 1.0), (2.0, 76.0, 0.5), (2.5, 74.0, 1.5)],
+    &[(0.5, 71.0, 0.5), (1.0, 74.0, 0.5), (1.5, 78.0, 0.5), (2.0, 76.0, 1.0), (3.0, 74.0, 1.0)],
+    &[(0.0, 71.0, 1.0), (1.0, 67.0, 0.5), (1.5, 71.0, 0.5), (2.0, 74.0, 1.5)],
+    &[(0.5, 73.0, 0.5), (1.0, 76.0, 0.5), (1.5, 73.0, 0.5), (2.0, 69.0, 2.0)],
+    &[(0.0, 78.0, 1.0), (1.0, 81.0, 1.0), (2.0, 78.0, 0.5), (2.5, 76.0, 1.5)],
+    &[(0.0, 74.0, 1.5), (1.5, 73.0, 0.5), (2.0, 71.0, 2.0)],
+    &[(0.5, 67.0, 0.5), (1.0, 71.0, 0.5), (1.5, 74.0, 0.5), (2.0, 79.0, 1.0), (3.0, 78.0, 0.5), (3.5, 76.0, 0.5)],
+    &[(0.0, 73.0, 1.5), (1.5, 76.0, 0.5), (2.0, 74.0, 2.0)],
+];
+// "Midnight Ramen" over Am9 Fmaj7 Dm7 E7: "steam on the window / noodles in a bowl / city's still awake now / warming up my soul".
+const RAMEN: [&[(f32, f32, f32)]; 8] = [
+    &[(0.5, 72.0, 0.5), (1.0, 71.0, 0.5), (1.5, 69.0, 0.5), (2.0, 72.0, 1.0), (3.0, 76.0, 1.0)],
+    &[(0.0, 77.0, 1.0), (1.0, 76.0, 0.5), (1.5, 72.0, 2.0)],
+    &[(0.5, 69.0, 0.5), (1.0, 72.0, 0.5), (1.5, 74.0, 0.5), (2.0, 77.0, 0.5), (2.5, 76.0, 0.5), (3.0, 74.0, 1.0)],
+    &[(0.0, 71.0, 1.0), (1.0, 68.0, 2.5)],
+    &[(0.0, 76.0, 1.0), (1.0, 79.0, 0.5), (1.5, 76.0, 0.5), (2.0, 72.0, 1.5)],
+    &[(0.5, 69.0, 0.5), (1.0, 72.0, 0.5), (1.5, 76.0, 0.5), (2.0, 77.0, 1.0), (3.0, 76.0, 1.0)],
+    &[(0.0, 74.0, 0.5), (0.5, 72.0, 0.5), (1.0, 69.0, 1.0), (2.0, 72.0, 0.5), (2.5, 71.0, 1.5)],
+    &[(0.0, 68.0, 1.0), (1.0, 71.0, 1.0), (2.0, 69.0, 2.0)],
+];
+// "Snowfall Study Hall" over Abmaj7 Gm7 Fm7 Bb7: "snow outside the window / quiet as can be / pencil tapping softly / just the lamp and me".
+const SNOWFALL: [&[(f32, f32, f32)]; 8] = [
+    &[(0.5, 72.0, 0.5), (1.0, 75.0, 0.5), (1.5, 79.0, 1.0), (2.5, 77.0, 0.5), (3.0, 75.0, 1.0)],
+    &[(0.0, 74.0, 1.5), (1.5, 70.0, 0.5), (2.0, 67.0, 2.0)],
+    &[(0.5, 68.0, 0.5), (1.0, 72.0, 0.5), (1.5, 75.0, 0.5), (2.0, 77.0, 1.0), (3.0, 75.0, 1.0)],
+    &[(0.0, 74.0, 1.0), (1.0, 70.0, 2.5)],
+    &[(0.0, 79.0, 1.0), (1.0, 80.0, 0.5), (1.5, 79.0, 0.5), (2.0, 75.0, 1.5)],
+    &[(0.5, 70.0, 0.5), (1.0, 74.0, 0.5), (1.5, 77.0, 0.5), (2.0, 74.0, 1.0), (3.0, 70.0, 1.0)],
+    &[(0.0, 72.0, 0.5), (0.5, 75.0, 0.5), (1.0, 77.0, 1.0), (2.0, 80.0, 0.5), (2.5, 79.0, 0.5), (3.0, 77.0, 1.0)],
+    &[(0.0, 77.0, 1.0), (1.0, 74.0, 1.0), (2.0, 70.0, 2.0)],
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Inst {
@@ -97,6 +153,28 @@ enum Inst {
     MusicBox,    // light plinky tines (leads)
     Flute,       // soft breathy-free flute with gentle vibrato (leads)
     DustyKeys,   // electric piano through a worn tape: mellower, with a slow pitch wobble
+    Marimba,     // short woody mallet pluck, bright and light
+    Synth,       // soft square-wave lead: hollow and sharp, with a late vibrato
+}
+
+/// How the chord instrument plays each bar (PianoArp and Pad keep their own rhythm under Sustain).
+#[derive(Clone, Copy, PartialEq)]
+enum Comp {
+    Sustain,    // the instrument's own rhythm: held chord with a strum and the odd push
+    Stabs,      // short chords on the off-beats
+    Charleston, // a short hit on 1 and a longer one on the "and" of 2
+    Arp,        // chord tones climbing and falling in eighths, an octave up
+}
+
+/// How the bass moves under each bar.
+#[derive(Clone, Copy, PartialEq)]
+enum Bass {
+    Push,    // the one, and a lazy push before beat three
+    Long,    // one long round note per bar
+    Glide,   // 808: a long sub that glides from the previous note
+    Octaves, // bouncing between the root and its octave in eighths
+    Walk,    // quarter notes: root, fifth, octave, fifth
+    Synco,   // syncopated hits around the beat
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -105,6 +183,7 @@ enum Groove {
     RnB,     // half-time: syncopated kick, clap, rolling 16th hats, gliding 808 bass
     Soft,    // no kick: rim and shaker only
     Ballad,  // soft kick on 1, brush on 3, long bass notes, slow sustained melody
+    Bounce,  // crisp and quick: kick on 1 and the "and" of 2, snappy snare on 2 and 4, 16th hats, an open hat at the end
 }
 
 struct Track {
@@ -115,19 +194,27 @@ struct Track {
     chords: Inst,
     lead: Inst,
     groove: Groove,
+    comp: Comp,
+    bass: Bass,
+    lift: f32, // semitones the melody moves (12 = an octave up)
     melody: f32, // chance of a melody note per eighth (when there's no tune)
     tune: &'static [&'static [(f32, f32, f32)]], // written melody over progs[0], one bar per chord: (beat, MIDI note, beats long); empty = improvised
     warmth: f32, // low-pass amount: lower is darker
     lofi: bool,  // lofi hip-hop treatment: heavier swing, everything but the kick dips on each kick, quieter melody
 }
 
-const TRACKS: [Track; 6] = [
-    Track { name: "Rainy Window Seat", bpm: 74.0, transpose: 0.0, progs: [FMAJ_EM_DM_CMAJ, DM9_G13_CMAJ9_AM7], chords: Inst::DustyKeys, lead: Inst::DustyKeys, groove: Groove::BoomBap, melody: 0.12, tune: &RAINY, warmth: 0.30, lofi: true },
-    Track { name: "Last Bus Home", bpm: 70.0, transpose: -2.0, progs: [AM7_DM7_G7_CMAJ7, CMAJ_AM_FMAJ_G7], chords: Inst::Vibes, lead: Inst::Piano, groove: Groove::BoomBap, melody: 0.12, tune: &LAST_BUS, warmth: 0.38, lofi: false },
-    Track { name: "Sunday Matcha", bpm: 76.0, transpose: 1.0, progs: [CMAJ_AM_FMAJ_G7, FMAJ_EM_DM_CMAJ], chords: Inst::PianoArp, lead: Inst::MusicBox, groove: Groove::Soft, melody: 0.14, tune: &SUNDAY, warmth: 0.44, lofi: false },
-    Track { name: "Night Shift Neon", bpm: 64.0, transpose: -3.0, progs: [EBMAJ_DM_CM_BBMAJ, BBMAJ_AM_GM_FMAJ], chords: Inst::Pad, lead: Inst::Keys, groove: Groove::RnB, melody: 0.12, tune: &NIGHT_SHIFT, warmth: 0.33, lofi: false },
-    Track { name: "Letters Never Sent", bpm: 58.0, transpose: 0.0, progs: [C_G_AM_F, C_G_AM_F], chords: Inst::Pad, lead: Inst::Flute, groove: Groove::Ballad, melody: 0.0, tune: &LETTERS, warmth: 0.42, lofi: false },
-    Track { name: "Moonlit Walk Home", bpm: 60.0, transpose: -2.0, progs: [AM_F_C_G, AM_F_C_G], chords: Inst::PianoArp, lead: Inst::Piano, groove: Groove::Ballad, melody: 0.0, tune: &MOONLIT, warmth: 0.44, lofi: false },
+// No two songs share their chord and melody instruments together, or their beat, chord rhythm and bass together.
+const TRACKS: [Track; 10] = [
+    Track { name: "Rainy Window Seat", bpm: 74.0, transpose: 0.0, progs: [FMAJ_EM_DM_CMAJ, DM9_G13_CMAJ9_AM7], chords: Inst::DustyKeys, lead: Inst::DustyKeys, groove: Groove::BoomBap, comp: Comp::Sustain, bass: Bass::Push, lift: 0.0, melody: 0.12, tune: &RAINY, warmth: 0.30, lofi: true },
+    Track { name: "Last Bus Home", bpm: 70.0, transpose: -2.0, progs: [AM7_DM7_G7_CMAJ7, CMAJ_AM_FMAJ_G7], chords: Inst::Vibes, lead: Inst::Piano, groove: Groove::BoomBap, comp: Comp::Stabs, bass: Bass::Walk, lift: 0.0, melody: 0.12, tune: &LAST_BUS, warmth: 0.38, lofi: false },
+    Track { name: "Sunday Matcha", bpm: 76.0, transpose: 1.0, progs: [CMAJ_AM_FMAJ_G7, FMAJ_EM_DM_CMAJ], chords: Inst::PianoArp, lead: Inst::MusicBox, groove: Groove::Soft, comp: Comp::Sustain, bass: Bass::Push, lift: 0.0, melody: 0.14, tune: &SUNDAY, warmth: 0.44, lofi: false },
+    Track { name: "Night Shift Neon", bpm: 64.0, transpose: -3.0, progs: [EBMAJ_DM_CM_BBMAJ, BBMAJ_AM_GM_FMAJ], chords: Inst::Pad, lead: Inst::Keys, groove: Groove::RnB, comp: Comp::Sustain, bass: Bass::Glide, lift: 0.0, melody: 0.12, tune: &NIGHT_SHIFT, warmth: 0.33, lofi: false },
+    Track { name: "Letters Never Sent", bpm: 58.0, transpose: 0.0, progs: [C_G_AM_F, C_G_AM_F], chords: Inst::Pad, lead: Inst::Flute, groove: Groove::Ballad, comp: Comp::Sustain, bass: Bass::Long, lift: 0.0, melody: 0.0, tune: &LETTERS, warmth: 0.42, lofi: false },
+    Track { name: "Moonlit Walk Home", bpm: 60.0, transpose: -2.0, progs: [AM_F_C_G, AM_F_C_G], chords: Inst::PianoArp, lead: Inst::Piano, groove: Groove::Ballad, comp: Comp::Sustain, bass: Bass::Walk, lift: 0.0, melody: 0.0, tune: &MOONLIT, warmth: 0.44, lofi: false },
+    Track { name: "Library Window Light", bpm: 86.0, transpose: 0.0, progs: [GM7_C9_FMAJ7_DM7, BBMAJ7_AM7_GM7_C7], chords: Inst::Keys, lead: Inst::Marimba, groove: Groove::Bounce, comp: Comp::Charleston, bass: Bass::Synco, lift: 0.0, melody: 0.12, tune: &LIBRARY_TUNE, warmth: 0.62, lofi: false },
+    Track { name: "Cat Nap Afternoon", bpm: 82.0, transpose: 0.0, progs: [DMAJ7_BM7_EM7_A7, GMAJ7_FSM7_EM7_A7SUS], chords: Inst::Marimba, lead: Inst::Flute, groove: Groove::Soft, comp: Comp::Arp, bass: Bass::Long, lift: 0.0, melody: 0.12, tune: &CAT_NAP, warmth: 0.68, lofi: false },
+    Track { name: "Midnight Ramen", bpm: 84.0, transpose: 0.0, progs: [AM9_FMAJ7_DM7_E7, FMAJ7_G6_EM7_AM7], chords: Inst::Keys, lead: Inst::Synth, groove: Groove::RnB, comp: Comp::Stabs, bass: Bass::Glide, lift: 0.0, melody: 0.12, tune: &RAMEN, warmth: 0.60, lofi: false },
+    Track { name: "Snowfall Study Hall", bpm: 88.0, transpose: 0.0, progs: [ABMAJ7_GM7_FM7_BB7, EBMAJ7_CM7_FM7_BB7], chords: Inst::Pad, lead: Inst::Piano, groove: Groove::Bounce, comp: Comp::Sustain, bass: Bass::Octaves, lift: 12.0, melody: 0.12, tune: &SNOWFALL, warmth: 0.65, lofi: false },
 ];
 
 /// How the next song is chosen.
@@ -244,6 +331,8 @@ enum Cmd {
     SetMode(Mode),
     Select(String), // make a playlist current by name, without playing
     Rescan,
+    Voice(String), // one of her recorded lines (voice::say decided it should play)
+    VoiceMp3(Vec<u8>), // a line just spoken live (voice::say_live)
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
@@ -288,6 +377,14 @@ pub fn set_mode(mode: Mode) {
 /// Restores the saved playlist at startup (the built-in one if that folder is gone).
 pub fn select(playlist: &str) {
     send(Cmd::Select(playlist.to_string()));
+}
+/// Plays one of her recorded lines, under the music. Use voice::say, which decides whether she speaks.
+pub fn speak(text: String) {
+    send(Cmd::Voice(text));
+}
+/// Plays mp3 bytes in her voice, under the music. Use voice::say_live.
+pub fn speak_mp3(mp3: Vec<u8>) {
+    send(Cmd::VoiceMp3(mp3));
 }
 /// Re-reads the music folder; the song list calls this when it opens.
 pub fn rescan() {
@@ -338,17 +435,22 @@ impl Deck {
         }
     }
 
-    /// Starts `song` `at` seconds in. Err if there's no sound device or the file can't be read or decoded.
-    fn start(&mut self, song: &Song, at: f32, seed: u32) -> Result<(), ()> {
-        use rodio::Source;
-        self.silence();
-        self.paused = false;
+    /// The sound device, opened on first use and kept. Err if there isn't one.
+    fn device(&mut self) -> Result<&rodio::MixerDeviceSink, ()> {
         if self.out.is_none() {
             let mut out = rodio::DeviceSinkBuilder::open_default_sink().map_err(|_| ())?;
             out.log_on_drop(false);
             self.out = Some(out);
         }
-        let player = rodio::Player::connect_new(self.out.as_ref().unwrap().mixer());
+        Ok(self.out.as_ref().unwrap())
+    }
+
+    /// Starts `song` `at` seconds in. Err if there's no sound device or the file can't be read or decoded.
+    fn start(&mut self, song: &Song, at: f32, seed: u32) -> Result<(), ()> {
+        use rodio::Source;
+        self.silence();
+        self.paused = false;
+        let player = rodio::Player::connect_new(self.device()?.mixer());
         match song {
             Song::Synth(t) => {
                 if self.synth.as_ref().is_none_or(|(i, _)| i != t) {
@@ -370,6 +472,15 @@ impl Deck {
         }
         self.player = Some(player);
         Ok(())
+    }
+
+    /// Plays her voice (a newer line cuts off the one before), quieter than the music. None if it can't.
+    fn say(&mut self, mp3: Option<Vec<u8>>) -> Option<rodio::Player> {
+        let decoded = rodio::Decoder::new(std::io::Cursor::new(mp3?)).ok()?;
+        let p = rodio::Player::connect_new(self.device().ok()?.mixer());
+        p.set_volume(VOICE_VOLUME);
+        p.append(decoded);
+        Some(p)
     }
 
     fn pos(&self) -> f32 {
@@ -410,6 +521,7 @@ fn player(rx: Receiver<Cmd>) {
     let mut deck = Deck { out: None, player: None, synth: None, len: 0.0, paused: false };
     let (mut list, mut cur, mut mode) = (0usize, None::<usize>, Mode::Shuffle);
     let mut history: Vec<usize> = vec![]; // for Prev in shuffle
+    let mut voice = None::<rodio::Player>;
     loop {
         let cmd = match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(c) => Some(c),
@@ -454,6 +566,8 @@ fn player(rx: Receiver<Cmd>) {
             }
             (Some(Cmd::SetMode(m)), _) => mode = m,
             (Some(Cmd::Select(name)), None) => list = lists.iter().position(|l| l.name == name).unwrap_or(0),
+            (Some(Cmd::Voice(text)), _) => voice = deck.say(crate::voice::load(&text)).or(voice),
+            (Some(Cmd::VoiceMp3(mp3)), _) => voice = deck.say(Some(mp3)).or(voice),
             (Some(Cmd::Rescan), _) => {
                 let was_playing = cur.is_some();
                 refresh(&mut lists, &mut list, &mut cur);
@@ -464,6 +578,9 @@ fn player(rx: Receiver<Cmd>) {
             }
             (None, Some(c)) if deck.ended() => start = Some((after(mode, c, len, false, &mut rng), 0.0)),
             _ => {}
+        }
+        if voice.as_ref().is_some_and(|v| v.empty()) {
+            voice = None;
         }
         // Start the chosen song; if a file won't play, try the next ones (each at most once).
         // If nothing in the playlist plays, fall back to her own songs rather than going silent.
@@ -612,6 +729,28 @@ fn dusty_keys(buf: &mut [f32], start: f32, midi: f32, secs: f32, vol: f32) {
     });
 }
 
+/// Marimba: a woody bar, its tuned fourth partial ringing briefly over a short body.
+fn marimba(buf: &mut [f32], start: f32, midi: f32, secs: f32, vol: f32) {
+    let f = freq(midi);
+    add(buf, start, secs.min(1.2), |t| {
+        let env = (t / 0.002).min(1.0) * (-t * 5.0).exp();
+        let tone = (TAU * f * t).sin() + 0.3 * (TAU * 3.93 * f * t).sin() * (-t * 22.0).exp();
+        vol * 1.2 * env * tone
+    });
+}
+
+/// Soft square lead: odd harmonics (rounded off), a quick attack, and a vibrato that comes in late.
+fn synth(buf: &mut [f32], start: f32, midi: f32, secs: f32, vol: f32) {
+    let f = freq(midi);
+    let mut phase = 0.0;
+    add(buf, start, secs, |t| {
+        phase += TAU * f * (1.0 + 0.005 * (TAU * 5.5 * t).sin() * ((t - 0.2) / 0.3).clamp(0.0, 1.0)) / RATE as f32;
+        let env = (t / 0.01).min(1.0) * (-t * 0.8).exp() * ((secs - t) / 0.04).clamp(0.0, 1.0);
+        let tone = phase.sin() + (3.0 * phase).sin() / 3.0 * 0.7 + (5.0 * phase).sin() / 5.0 * 0.4 + (7.0 * phase).sin() / 7.0 * 0.2;
+        vol * 0.7 * env * tone
+    });
+}
+
 /// One note on `inst`.
 fn note(buf: &mut [f32], inst: Inst, start: f32, midi: f32, secs: f32, vol: f32) {
     match inst {
@@ -622,12 +761,43 @@ fn note(buf: &mut [f32], inst: Inst, start: f32, midi: f32, secs: f32, vol: f32)
         Inst::Pad => pad(buf, start, midi, secs, vol),
         Inst::Vibes => vibes(buf, start, midi, secs, vol * 0.8),
         Inst::Piano | Inst::PianoArp => piano(buf, start, midi, secs, vol),
+        Inst::Marimba => marimba(buf, start, midi, secs, vol),
+        Inst::Synth => synth(buf, start, midi, secs, vol),
     }
 }
 
 /// A bar of the chord on `inst`, in that instrument's own rhythm.
-fn chord_bar(buf: &mut [f32], inst: Inst, t0: f32, beat: f32, chord: &[f32], rng: &mut Rng) {
+fn chord_bar(buf: &mut [f32], inst: Inst, comp: Comp, t0: f32, beat: f32, chord: &[f32], rng: &mut Rng) {
     let bar = beat * 4.0;
+    match comp {
+        Comp::Stabs => {
+            for k in [0.5, 1.5, 2.5, 3.5] {
+                if k == 2.5 && rng.next() < 0.3 {
+                    continue; // a gap now and then so it breathes
+                }
+                for (i, n) in chord.iter().enumerate() {
+                    note(buf, inst, t0 + k * beat + i as f32 * 0.006, *n, beat * 0.35, 0.055);
+                }
+            }
+            return;
+        }
+        Comp::Charleston => {
+            for (k, len) in [(0.0, 1.2), (1.5, 2.3)] {
+                for (i, n) in chord.iter().enumerate() {
+                    note(buf, inst, t0 + k * beat + i as f32 * 0.01, *n, len * beat, 0.06);
+                }
+            }
+            return;
+        }
+        Comp::Arp => {
+            for (step, k) in [0, 1, 2, 3, 4, 3, 2, 1].into_iter().enumerate() {
+                let n = chord.get(k).copied().unwrap_or(chord[0] + 12.0) + 12.0;
+                note(buf, inst, t0 + step as f32 * beat / 2.0, n, beat * 0.9, 0.045);
+            }
+            return;
+        }
+        Comp::Sustain => {}
+    }
     match inst {
         Inst::PianoArp => {
             // Left-hand root, then the chord broken upward and back in eighths, over a quiet string pad.
@@ -640,7 +810,7 @@ fn chord_bar(buf: &mut [f32], inst: Inst, t0: f32, beat: f32, chord: &[f32], rng
                 pad(buf, t0, *n, bar + 0.3, 0.02);
             }
         }
-        Inst::Keys | Inst::Vibes | Inst::Piano | Inst::MusicBox | Inst::Flute | Inst::DustyKeys => {
+        Inst::Keys | Inst::Vibes | Inst::Piano | Inst::MusicBox | Inst::Flute | Inst::DustyKeys | Inst::Marimba | Inst::Synth => {
             for (i, n) in chord.iter().enumerate() {
                 note(buf, inst, t0 + i as f32 * 0.018, *n, bar, 0.07); // slight strum
                 if rng.next() < 0.5 {
@@ -654,6 +824,12 @@ fn chord_bar(buf: &mut [f32], inst: Inst, t0: f32, beat: f32, chord: &[f32], rng
             }
         }
     }
+}
+
+/// A round bass note with a soft attack and release (no clicks on short notes).
+fn bass_note(buf: &mut [f32], at: f32, midi: f32, secs: f32, vol: f32, decay: f32) {
+    let f = freq(midi);
+    add(buf, at, secs, |t| vol * (t / 0.01).min(1.0) * ((secs - t) / 0.015).clamp(0.0, 1.0) * (-t * decay).exp() * ((TAU * f * t).sin() + 0.2 * (TAU * 2.0 * f * t).sin()));
 }
 
 /// Kick: a sine that drops in pitch.
@@ -694,39 +870,56 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
         for b in 0..8 {
             let t0 = (section * 8 + b) as f32 * bar;
             let chord: Vec<f32> = prog[b % 4].iter().map(|n| n + track.transpose).collect();
-            chord_bar(&mut buf, track.chords, t0, beat, &chord, &mut rng);
+            chord_bar(&mut buf, track.chords, track.comp, t0, beat, &chord, &mut rng);
             // Bass in the 41-82 Hz octave.
             let root = (chord[0] - 28.0).rem_euclid(12.0) + 28.0;
-            if track.groove == Groove::RnB {
-                // 808: a long sub that glides up from the previous note.
-                let (from, to) = (freq(if last_bass > 0.0 { last_bass } else { root }), freq(root));
-                let mut phase = 0.0;
-                add(&mut buf, t0, bar * 0.95, |t| {
-                    let f = to + (from - to) * (-t * 18.0).exp();
-                    phase += TAU * f / RATE as f32;
-                    0.32 * (t / 0.005).min(1.0) * (-t * 0.9).exp() * (phase.sin() * 1.4).tanh()
-                });
-            } else if track.groove == Groove::Ballad {
-                // One long, round note per bar.
-                let f = freq(root);
-                add(&mut buf, t0, bar, |t| 0.2 * (t / 0.02).min(1.0) * (-t * 0.8).exp() * ((TAU * f * t).sin() + 0.15 * (TAU * 2.0 * f * t).sin()));
-            } else {
-                // Bass on the one and a lazy push before beat three.
-                let f = freq(root);
-                for at in [0.0, beat * 1.75] {
-                    add(&mut buf, t0 + at, beat * 2.0, |t| 0.22 * (t / 0.01).min(1.0) * (-t * 2.2).exp() * ((TAU * f * t).sin() + 0.2 * (TAU * 2.0 * f * t).sin()));
+            match track.bass {
+                Bass::Glide => {
+                    // 808: a long sub that glides up from the previous note.
+                    let (from, to) = (freq(if last_bass > 0.0 { last_bass } else { root }), freq(root));
+                    let mut phase = 0.0;
+                    add(&mut buf, t0, bar * 0.95, |t| {
+                        let f = to + (from - to) * (-t * 18.0).exp();
+                        phase += TAU * f / RATE as f32;
+                        0.32 * (t / 0.005).min(1.0) * (-t * 0.9).exp() * (phase.sin() * 1.4).tanh()
+                    });
+                }
+                Bass::Long => {
+                    let f = freq(root);
+                    add(&mut buf, t0, bar, |t| 0.2 * (t / 0.02).min(1.0) * (-t * 0.8).exp() * ((TAU * f * t).sin() + 0.15 * (TAU * 2.0 * f * t).sin()));
+                }
+                Bass::Push => {
+                    for at in [0.0, 1.75] {
+                        bass_note(&mut buf, t0 + at * beat, root, beat * 2.0, 0.22, 2.2);
+                    }
+                }
+                Bass::Octaves => {
+                    for e in 0..8 {
+                        let up = e % 2 == 1;
+                        bass_note(&mut buf, t0 + e as f32 * beat / 2.0, root + if up { 12.0 } else { 0.0 }, beat * 0.4, if up { 0.12 } else { 0.2 }, 4.0);
+                    }
+                }
+                Bass::Walk => {
+                    for (q, step) in [0.0, 7.0, 12.0, 7.0].into_iter().enumerate() {
+                        bass_note(&mut buf, t0 + q as f32 * beat, root + step, beat * 0.9, 0.19, 2.0);
+                    }
+                }
+                Bass::Synco => {
+                    for (at, len) in [(0.0, 0.6), (0.75, 0.4), (2.0, 0.6), (2.75, 0.4), (3.5, 0.4)] {
+                        bass_note(&mut buf, t0 + at * beat, root, len * beat, 0.21, 3.0);
+                    }
                 }
             }
             last_bass = root;
             if section >= 1 && sing {
                 for &(at, n, beats) in track.tune[b % track.tune.len()] {
                     let vol = if track.lofi { 0.055 } else { 0.075 }; // lofi keeps the melody back in the mix
-                    note(&mut buf, track.lead, t0 + at * beat, n + track.transpose, beats * beat * 1.15, vol);
+                    note(&mut buf, track.lead, t0 + at * beat, n + track.transpose + track.lift, beats * beat * 1.15, vol);
                 }
             } else if section >= 1 {
                 for step in 0..8 {
                     if rng.next() < track.melody {
-                        let n = chord[(rng.next() * chord.len() as f32) as usize % chord.len()] + 12.0;
+                        let n = chord[(rng.next() * chord.len() as f32) as usize % chord.len()] + 12.0 + track.lift;
                         let swing = if step % 2 == 1 { beat * swing_amt } else { 0.0 };
                         let len = if track.groove == Groove::Ballad { beat * 3.0 } else { beat * 1.5 }; // ballads sing long notes
                         note(&mut buf, track.lead, t0 + step as f32 * beat / 2.0 + swing, n, len, 0.05);
@@ -783,6 +976,26 @@ fn render(track: &Track, seed: u32) -> Vec<f32> {
                     noise_hit(&mut buf, t0 + 2.0 * beat, 0.35, 9.0, 0.3, false, 0.12, rng.0); // brush
                     for q in 0..4 {
                         noise_hit(&mut buf, t0 + q as f32 * beat, 0.08, 40.0, 0.6, true, 0.018, rng.0);
+                    }
+                }
+                Groove::Bounce => {
+                    for k in [0.0, 1.5, 2.5] {
+                        if k != 2.5 || rng.next() < 0.5 {
+                            kick(&mut buf, t0 + k * beat, 0.42);
+                        }
+                    }
+                    // Snappy snare: a short bright burst plus a tight body tone.
+                    for s in [1.0, 3.0] {
+                        noise_hit(&mut buf, t0 + s * beat, 0.16, 24.0, 0.75, false, 0.15, rng.0);
+                        add(&mut buf, t0 + s * beat, 0.08, |t| 0.07 * (-t * 35.0).exp() * (TAU * 210.0 * t).sin());
+                    }
+                    for h in 0..16 {
+                        let at = t0 + h as f32 * beat / 4.0;
+                        if h == 14 {
+                            noise_hit(&mut buf, at, 0.22, 16.0, 0.5, true, 0.028, rng.0); // open hat
+                        } else {
+                            noise_hit(&mut buf, at, 0.035, 110.0, 0.5, true, if h % 2 == 0 { 0.03 } else { 0.017 }, rng.0);
+                        }
                     }
                 }
                 Groove::Soft => {
@@ -855,6 +1068,20 @@ mod tests {
             let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
             let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
             assert!(peak < 0.99 && rms > 0.03, "track {i}: peak {peak}, rms {rms}");
+            // Written melodies: eight bars, each note inside its bar and in a singable range.
+            assert!(track.tune.is_empty() || track.tune.len() == 8, "track {i}: tune isn't 8 bars");
+            for (b, bar) in track.tune.iter().enumerate() {
+                for &(at, n, beats) in *bar {
+                    assert!(at + beats <= 4.0 && (60.0..=84.0).contains(&n), "track {i} bar {b}: note {n} at {at} for {beats}");
+                }
+            }
+        }
+        // Every song sounds like itself: no shared instrument pair, no shared beat + chord rhythm + bass.
+        for (i, a) in TRACKS.iter().enumerate() {
+            for b in &TRACKS[i + 1..] {
+                assert!((a.chords, a.lead) != (b.chords, b.lead), "{} and {} share instruments", a.name, b.name);
+                assert!((a.groove, a.comp, a.bass) != (b.groove, b.comp, b.bass), "{} and {} share a rhythm section", a.name, b.name);
+            }
         }
         let bytes = wav(&[0.0; 10]);
         assert_eq!(&bytes[..4], b"RIFF");

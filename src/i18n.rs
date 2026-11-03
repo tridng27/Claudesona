@@ -65,6 +65,24 @@ pub struct Ui {
     pub helper: &'static str,
     pub online: &'static str,
     pub using: &'static str,
+    pub chat_hint: &'static str,
+    pub chat_thinking: &'static str,
+    pub chat_failed: &'static str,
+    pub memories: &'static str,
+    pub forget_all: &'static str,
+    pub forget_sure: &'static str,
+    pub voice: &'static str,
+    pub my_voice: &'static str,
+    pub voice_id_hint: &'static str,
+    pub api_key_hint: &'static str,
+    pub make_voice: &'static str,
+    pub default_voice: &'static str,
+    pub voice_making: &'static str,
+    pub voice_done: &'static str,
+    pub voice_need: &'static str,
+    pub save_key: &'static str,
+    pub key_saved: &'static str,
+    pub forget_key: &'static str,
 }
 
 const EN_UI: Ui = Ui {
@@ -100,6 +118,24 @@ const EN_UI: Ui = Ui {
     helper: "Sending a helper…",
     online: "Looking it up online…",
     using: "Using {name}…",
+    chat_hint: "Talk to me~ (Enter to send)",
+    chat_thinking: "Hmm, let me think…",
+    chat_failed: "Your sidekick couldn't reach her brain just now… try again? (・ω・)",
+    memories: "Memories",
+    forget_all: "Forget everything",
+    forget_sure: "Sure? Click again",
+    voice: "Voice",
+    my_voice: "My own voice",
+    voice_id_hint: "ElevenLabs voice ID",
+    api_key_hint: "ElevenLabs API key",
+    make_voice: "Make my voice (~{n} characters, once)",
+    default_voice: "Back to her default voice",
+    voice_making: "Making her voice… {i}/{n}",
+    voice_done: "Done: {n} lines in her new voice~",
+    voice_need: "Enter your ElevenLabs API key and a voice ID.",
+    save_key: "Save key",
+    key_saved: "ElevenLabs key saved ✓",
+    forget_key: "Remove key",
 };
 
 const VI_UI: Ui = Ui {
@@ -135,6 +171,24 @@ const VI_UI: Ui = Ui {
     helper: "Gửi phụ tá nhỏ đi…",
     online: "Đang tra trên mạng…",
     using: "Đang dùng {name}…",
+    chat_hint: "Nói chuyện với tớ nè~ (Enter để gửi)",
+    chat_thinking: "Ưm, để tớ nghĩ chút…",
+    chat_failed: "Tớ chưa nghĩ ra được… cậu thử lại nha? (・ω・)",
+    memories: "Ký ức",
+    forget_all: "Quên hết",
+    forget_sure: "Chắc chưa? Bấm lần nữa",
+    voice: "Giọng nói",
+    my_voice: "Giọng riêng của cậu",
+    voice_id_hint: "Voice ID trên ElevenLabs",
+    api_key_hint: "API key ElevenLabs",
+    make_voice: "Tạo giọng (~{n} ký tự, một lần)",
+    default_voice: "Về giọng mặc định",
+    voice_making: "Đang tạo giọng… {i}/{n}",
+    voice_done: "Xong: {n} câu với giọng mới nè~",
+    voice_need: "Nhập API key ElevenLabs và voice ID nha.",
+    save_key: "Lưu key",
+    key_saved: "Đã lưu key ElevenLabs ✓",
+    forget_key: "Xoá key",
 };
 
 pub fn ui() -> &'static Ui {
@@ -147,6 +201,8 @@ pub fn ui() -> &'static Ui {
 /// Her lines, picked at random. Game lines may contain `{w}` for the word.
 pub struct Lines {
     pub idle: &'static [&'static str],
+    pub bye: &'static [&'static str], // the Claude session she follows closed
+    pub working: &'static [&'static str], // while working with nothing else to say, swapped every 3s
     pub poke: &'static [&'static str],
     pub waiting: &'static [&'static str],
     pub music: &'static [&'static str],
@@ -162,6 +218,18 @@ pub struct Lines {
 }
 
 const EN_LINES: Lines = Lines {
+    working: &[
+        "Hmm hmm~ your sidekick is on it! (｀・ω・´)",
+        "Thinking reeeally hard… ✧",
+        "Almost there, I can feel it~! (≧▽≦)",
+        "Lots of brain power going on here~ (・ω・)",
+        "Juuust a moment more~ (◕‿◕)",
+    ],
+    bye: &[
+        "Session's all wrapped up~ Great work today! (^▽^)",
+        "Byeee, Claude~ your sidekick will be right here! (◕‿◕)",
+        "All done and closed~ call me when you need me! (｀・ω・´)",
+    ],
     idle: &[
         "Your sidekick is ready~ Want to work on something? (^▽^)",
         "Heyyy~ got anything for your sidekick to do?",
@@ -293,6 +361,18 @@ const EN_LINES: Lines = Lines {
 };
 
 const VI_LINES: Lines = Lines {
+    working: &[
+        "Hmm hmm~ tớ đang làm nè! (｀・ω・´)",
+        "Đang suy nghĩ cực kỳ chăm chỉ luôn… ✧",
+        "Sắp xong rồi, tớ cảm nhận được~! (≧▽≦)",
+        "Não tớ đang chạy hết công suất nè~ (・ω・)",
+        "Đợi tớ xíu xiuuu nữa thôi~ (◕‿◕)",
+    ],
+    bye: &[
+        "Xong phiên rồi nè~ Hôm nay cậu giỏi lắm! (^▽^)",
+        "Tạm biệt Claude nhaaa~ tớ vẫn ở đây nè! (◕‿◕)",
+        "Đóng hết rồi~ cần gì cứ gọi tớ nha! (｀・ω・´)",
+    ],
     idle: &[
         "Phụ tá sẵn sàng rồi nè~ Cậu muốn làm gì không? (^▽^)",
         "Cậu ơiii~ có việc gì cho tớ làm không?",
@@ -430,6 +510,20 @@ pub fn lines() -> &'static Lines {
     }
 }
 
+/// Every line recorded ahead of time, with its language code: needing your OK (the main one), working fillers,
+/// idle nudges, pokes, music, goodbyes, game reactions and the tour. Not shell lines (too many, said too often), and
+/// not lines with the game word in them (unknown ahead of time).
+pub fn voiced() -> Vec<(&'static str, &'static str)> {
+    let mut out = vec![];
+    for (l, code) in [(&EN_LINES, "en"), (&VI_LINES, "vi")] {
+        for set in [l.waiting, l.working, l.idle, l.poke, l.music, l.bye, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost] {
+            out.extend(set.iter().filter(|s| !s.contains('{')).map(|s| (*s, code)));
+        }
+        out.extend(l.tour.iter().map(|(_, s)| (*s, code)));
+    }
+    out
+}
+
 /// A playlist's name for display: the built-in one and loose files get translated names.
 pub fn playlist_name(name: &str) -> &str {
     match name {
@@ -470,7 +564,7 @@ mod tests {
     #[test]
     fn both_languages_have_every_line_set() {
         for l in [&EN_LINES, &VI_LINES] {
-            for set in [l.idle, l.poke, l.waiting, l.music, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost] {
+            for set in [l.idle, l.bye, l.working, l.poke, l.waiting, l.music, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost] {
                 assert!(set.len() >= 3);
             }
             assert!(l.commands.iter().all(|c| c.len() >= 3));

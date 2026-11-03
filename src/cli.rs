@@ -100,9 +100,9 @@ pub fn set_hooks(settings: &mut Value, cmd: Option<&str>) {
             let list = map.entry(event).or_insert_with(|| json!([]));
             if let Some(list) = list.as_array_mut() {
                 let mut entry = json!({ "hooks": [{ "type": "command", "command": cmd }] });
-                // Shell commands only: the log gets their line after they finish, so this is her only early signal.
+                // Shell commands and questions: the log gets their line only after they finish, so this is her only early signal.
                 if event == "PreToolUse" {
-                    entry["matcher"] = json!("Bash|PowerShell");
+                    entry["matcher"] = json!("Bash|PowerShell|AskUserQuestion");
                 }
                 list.push(entry);
             }
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(s["hooks"]["Notification"].as_array().unwrap().len(), 2);
         assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
         assert_eq!(s["hooks"]["PermissionRequest"].as_array().unwrap().len(), 1);
-        assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "Bash|PowerShell");
+        assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "Bash|PowerShell|AskUserQuestion");
         set_hooks(&mut s, None);
         assert_eq!(s, json!({ "theme": "dark", "hooks": { "Notification": [{ "hooks": [other] }] } }));
         let mut empty = json!({});

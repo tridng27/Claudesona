@@ -31,8 +31,10 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             let typed = content.as_str().is_some_and(|s| !s.trim_start().starts_with('<'));
             let blocks = content.as_array().into_iter().flatten();
             let has_text = blocks.clone().any(|b| b["type"] == "text");
+            // A background agent's tool_result only says it launched; its end comes as a <task-notification>.
+            let launched = d["toolUseResult"]["status"] == "async_launched";
             let mut events: Vec<Event> = blocks
-                .filter(|b| b["type"] == "tool_result")
+                .filter(|b| b["type"] == "tool_result" && !launched)
                 .filter_map(|b| Some(Event::AgentDone(b["tool_use_id"].as_str()?.to_string())))
                 .collect();
             if typed || has_text {
@@ -42,12 +44,11 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             if let Some(id) = d["toolUseResult"]["backgroundTaskId"].as_str() {
                 events.push(Event::ShellStart(id.to_string()));
             }
-            // Its end comes back as "<task-notification>\n<task-id>ID</task-id>…".
-            if let Some(id) = content.as_str().and_then(|s| s.strip_prefix("<task-notification>")?.split("<task-id>").nth(1)?.split('<').next()) {
-                events.push(Event::ShellDone(id.to_string()));
-            }
+            events.extend(task_notification(content.as_str()));
             events
         }
+        // Mid-turn, a background task's notification is logged only as a queued attachment.
+        Some("attachment") if d["attachment"]["type"] == "queued_command" => task_notification(d["attachment"]["prompt"].as_str()),
         Some("assistant") => {
             // Text followed by more tool calls is a side note; anything else is the final reply.
             let interim = d["message"]["stop_reason"] == "tool_use";
@@ -82,6 +83,14 @@ pub fn parse_line(line: &str) -> Vec<Event> {
         Some("system") if d["subtype"] == "turn_duration" => vec![Event::TurnEnd],
         _ => vec![],
     }
+}
+
+/// "<task-notification>\n<task-id>ID</task-id>\n<tool-use-id>…": the task ends, and so does the
+/// Agent call that launched it if it was a background agent.
+fn task_notification(text: Option<&str>) -> Vec<Event> {
+    let Some(body) = text.and_then(|s| s.strip_prefix("<task-notification>")) else { return vec![] };
+    let tag = |t: &str| Some(body.split(&format!("<{t}>")).nth(1)?.split('<').next()?.to_string());
+    tag("task-id").map(Event::ShellDone).into_iter().chain(tag("tool-use-id").map(Event::AgentDone)).collect()
 }
 
 pub fn tool_label(name: &str, input: &Value) -> String {
@@ -228,8 +237,16 @@ mod tests {
         let bg_done = r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>bdizax5j0</task-id>\n<tool-use-id>t2</tool-use-id>\n<status>completed</status>\n</task-notification>"}}"#;
         let plugin_note = r#"{"type":"user","message":{"content":"<task-notification>\nponytail: its hook was skipped.\n</task-notification>"}}"#;
         assert_eq!(parse_line(bg), vec![Event::AgentDone("t2".into()), Event::ShellStart("bdizax5j0".into())]);
-        assert_eq!(parse_line(bg_done), vec![Event::ShellDone("bdizax5j0".into())]);
+        assert_eq!(parse_line(bg_done), vec![Event::ShellDone("bdizax5j0".into()), Event::AgentDone("t2".into())]);
         assert!(parse_line(plugin_note).is_empty());
+        // Background agent: the launch reply isn't its end; the notification is.
+        let async_agent = r#"{"type":"user","message":{"content":[{"tool_use_id":"a2","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"ae851c9688370f621","description":"PR 1.3"}}"#;
+        let async_done = r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>ae851c9688370f621</task-id>\n<tool-use-id>a2</tool-use-id>\n<output-file>C:\\x.output</output-file>\n<status>completed</status>\n</task-notification>"}}"#;
+        assert!(parse_line(async_agent).is_empty());
+        assert_eq!(parse_line(async_done), vec![Event::ShellDone("ae851c9688370f621".into()), Event::AgentDone("a2".into())]);
+        // When it ends mid-turn, the notification only shows up as a queued attachment.
+        let queued = r#"{"parentUuid":"b0","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>a92510ec3180d73c5</task-id>\n<tool-use-id>a3</tool-use-id>\n<status>completed</status>\n<summary>Agent \"Review\" completed</summary>\n</task-notification>"},"type":"attachment"}"#;
+        assert_eq!(parse_line(queued), vec![Event::ShellDone("a92510ec3180d73c5".into()), Event::AgentDone("a3".into())]);
     }
 
     #[test]
