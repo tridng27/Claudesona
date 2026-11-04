@@ -125,6 +125,8 @@ Make a `skin` folder in her install folder (see Install) and put your PNGs in it
 | `game_excited_blink.png` | playing, eyes closed | no blinking |
 | `game_smug.png` | she won the game | `waiting.png` |
 | `game_pouty.png` | you won the game | `poke.png` |
+| `cheer.png` | you're typing a prompt | `waiting.png` |
+| `cheer_blink.png` | cheering, eyes closed | no blinking |
 
 - If `idle.png` is there, the whole skin replaces the built-in art; skin and built-in images are never mixed.
 - Every image: one full-body character standing on the bottom edge, transparent background, all on the same canvas size and framing. Any portrait size works, e.g. 1024×1536.

@@ -5,6 +5,7 @@ use eframe::egui::{Rect, pos2};
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute};
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow, SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, WM_NCCALCSIZE, WNDPROC,
@@ -24,6 +25,13 @@ pub fn click_through() -> bool {
 /// The window you're typing in right now.
 pub fn foreground() -> isize {
     unsafe { GetForegroundWindow() as isize }
+}
+
+/// Tick count of the last keyboard or mouse input anywhere. Says nothing about which key.
+pub fn last_input() -> u32 {
+    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    unsafe { GetLastInputInfo(&mut info) };
+    info.dwTime
 }
 
 /// Bring a window to the front, restoring it if minimized. Windows allows this because the

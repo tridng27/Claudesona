@@ -50,6 +50,11 @@ pub fn foreground() -> isize {
 
 pub fn focus(_window: isize) {}
 
+/// Last input time. Not tracked here, so typing never shows: she cheers only when a prompt is sent.
+pub fn last_input() -> u32 {
+    0
+}
+
 /// Borderless windows have no extra frame to remove here.
 pub fn remove_border(_window: isize) {}
 

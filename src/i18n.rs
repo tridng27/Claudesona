@@ -221,6 +221,7 @@ pub struct Lines {
     pub poke: &'static [&'static str],
     pub waiting: &'static [&'static str],
     pub music: &'static [&'static str],
+    pub cheer: &'static [&'static str], // you're typing a prompt
     pub tour: &'static [(Pose, &'static str)],
     pub thinking: &'static [&'static str],
     pub start: &'static [&'static str],
@@ -288,11 +289,19 @@ const EN_LINES: Lines = Lines {
         "Your sidekick's DJ mode: ON! (★ω★)",
         "A little music to make things cozy~ (◕‿◕)♪",
     ],
+    cheer: &[
+        "You got this~! Your sidekick is cheering for you! \\(^o^)/",
+        "Go go gooo~! Type away! ☆",
+        "Ooh, a new idea? I can't wait~! (★ω★)",
+        "Fighting~! Your sidekick believes in you! (｀・ω・´)",
+        "Yesss, tell Claude everything~! ✧",
+    ],
     tour: &[
         (Pose::Idle, "Hiii~! I'm your friendly smol virtual sidekick! (^▽^) I watch Claude Code work and tell you all about it~"),
         (Pose::Working, "When Claude gets busy, your sidekick works sooo hard too! (｀・ω・´) I show what it's doing: reading files, running commands…"),
         (Pose::Waiting, "When Claude needs your OK, I'll strike a pose and shout so you never miss it! ☆"),
         (Pose::Idle, "When Claude finishes, your sidekick tells you the answer in my own words~ Click my bubble to read more! ✧"),
+        (Pose::Cheer, "When you type a new prompt, your sidekick cheers you on! You got this~! ☆"),
         (Pose::Poke, "Poke me and I get grumpy… (￣^￣) but double-click me and I'll bring your terminal back!"),
         (Pose::Music, "When it's quiet for a while, I play music for you~ ♪ Add your own playlists too!"),
         (Pose::Excited, "Bored? Pick \"Play with me\" and we'll play a word-guessing game! I get sooo excited~ (★ω★)"),
@@ -441,11 +450,19 @@ const VI_LINES: Lines = Lines {
         "Chế độ DJ của phụ tá: BẬT! (★ω★)",
         "Một chút nhạc cho ấm áp nè~ (◕‿◕)♪",
     ],
+    cheer: &[
+        "Cố lên cậu ơiii~! Phụ tá cổ vũ cậu nè! \\(^o^)/",
+        "Gõ đi gõ điii~! ☆",
+        "Ý tưởng mới hả? Tớ hóng quá điii~! (★ω★)",
+        "Cậu làm được mà~! Tớ tin cậu! (｀・ω・´)",
+        "Kể hết cho Claude nghe đi cậu~! ✧",
+    ],
     tour: &[
         (Pose::Idle, "Chào cậuuu~! Tớ là phụ tá ảo nhỏ bé của cậu nè! (^▽^) Tớ theo dõi Claude Code làm việc rồi kể lại cho cậu nghe~"),
         (Pose::Working, "Khi Claude bận, phụ tá cũng làm việc chăm chỉ lắm! (｀・ω・´) Tớ cho cậu biết Claude đang làm gì: đọc file, chạy lệnh…"),
         (Pose::Waiting, "Khi Claude cần cậu đồng ý, tớ sẽ tạo dáng và gọi cậu thật to để cậu không bỏ lỡ! ☆"),
         (Pose::Idle, "Khi Claude xong việc, phụ tá sẽ kể lại câu trả lời bằng lời của tớ~ Bấm vào bong bóng chat của tớ để đọc thêm nha! ✧"),
+        (Pose::Cheer, "Khi cậu gõ lệnh mới, phụ tá sẽ cổ vũ cậu nè! Cố lên cậu ơi~! ☆"),
         (Pose::Poke, "Cậu chọc là tớ dỗi đó… (￣^￣) nhưng bấm đúp vào tớ là tớ mở lại terminal cho cậu liền!"),
         (Pose::Music, "Khi yên tĩnh một lúc, tớ sẽ mở nhạc cho cậu nghe~ ♪ Cậu thêm playlist riêng cũng được nha!"),
         (Pose::Excited, "Chán hả? Chọn \"Chơi với tớ\" là mình chơi đoán chữ nè! Tớ háo hức quááá~ (★ω★)"),
@@ -553,7 +570,7 @@ pub fn lines() -> &'static Lines {
 pub fn voiced() -> Vec<(&'static str, &'static str)> {
     let mut out = vec![];
     for (l, code) in [(&EN_LINES, "en"), (&VI_LINES, "vi")] {
-        for set in [l.waiting, l.working, l.idle, l.poke, l.music, l.bye, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
+        for set in [l.waiting, l.working, l.idle, l.poke, l.music, l.cheer, l.bye, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
             out.extend(set.iter().filter(|s| !s.contains('{')).map(|s| (*s, code)));
         }
         out.extend(l.tour.iter().map(|(_, s)| (*s, code)));
@@ -601,7 +618,7 @@ mod tests {
     #[test]
     fn both_languages_have_every_line_set() {
         for l in [&EN_LINES, &VI_LINES] {
-            for set in [l.idle, l.bye, l.working, l.poke, l.waiting, l.music, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
+            for set in [l.idle, l.bye, l.working, l.poke, l.waiting, l.music, l.cheer, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
                 assert!(set.len() >= 3);
             }
             assert!(l.commands.iter().all(|c| c.len() >= 3));

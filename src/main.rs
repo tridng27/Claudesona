@@ -36,6 +36,9 @@ const POPUP_SLIDE: f32 = 28.0; // points the popup slides out from her
 const POPUP_IN: f32 = 0.18; // seconds the popup takes to slide and fade in
 const FILLER_EVERY: f32 = 3.0; // seconds each general working line shows
 const FINISHED_FLASH: f32 = 2.5; // seconds of Waiting pose when work is confirmed finished
+const TYPING_SHOWS: f32 = 1.5; // seconds she keeps cheering after your last keystroke
+const CHEER_ON_SEND: f32 = 2.5; // seconds she cheers when your prompt reaches the log
+const CHEER_LINE_EVERY: f32 = 20.0; // at most one cheer line this often
 const REWRITE_TIMEOUT: f32 = 30.0;
 const CREAM: Color32 = Color32::from_rgb(0xFB, 0xF4, 0xEA);
 const CORAL: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
@@ -120,6 +123,8 @@ fn asset(name: &str) -> Option<&'static [u8]> {
         "game_excited_blink" => include_bytes!("../assets/game_excited_blink.png"),
         "game_smug" => include_bytes!("../assets/game_smug.png"),
         "game_pouty" => include_bytes!("../assets/game_pouty.png"),
+        "cheer" => include_bytes!("../assets/cheer.png"),
+        "cheer_blink" => include_bytes!("../assets/cheer_blink.png"),
         _ => return None,
     })
 }
@@ -269,6 +274,12 @@ struct App {
     finished_at: f32,   // when Claude's work was last confirmed finished: she shows Waiting briefly
     voice_on: bool,     // remembered
     filler: usize,      // the working line she said last
+    last_input: u32,    // OS tick of the last keyboard or mouse input seen
+    last_cursor: Option<(f32, f32)>,
+    keys: Vec<f32>,     // recent inputs in your terminal with the mouse still: keystrokes
+    typed_at: f32,      // last keystroke while she's cheering you on
+    cheer_until: f32,   // cheering because a prompt was just sent
+    cheer_said: f32,    // when she last said a cheer line
 }
 
 impl App {
@@ -303,6 +314,7 @@ impl App {
             sprite("game_excited", "game_excited_blink", "idle"),
             sprite("game_smug", "", "waiting"),
             sprite("game_pouty", "", "poke"),
+            sprite("cheer", "cheer_blink", "waiting"),
         ];
 
         std::thread::spawn(chat::preload); // memory.json and the embedding model, off the UI thread
@@ -387,6 +399,12 @@ impl App {
             finished_at: -99.0,
             voice_on,
             filler: 0,
+            last_input: 0,
+            last_cursor: None,
+            keys: vec![],
+            typed_at: -99.0,
+            cheer_until: -99.0,
+            cheer_said: -99.0,
         }
     }
 
@@ -904,6 +922,7 @@ impl App {
             if fg != 0 && fg != self.hwnd {
                 self.terminal = fg;
             }
+            self.cheer_until = t + CHEER_ON_SEND;
         }
         // Follow one session: events from other Claude windows are ignored.
         if *self.session.get_or_insert_with(|| path.clone()) != path {
@@ -1017,6 +1036,23 @@ impl eframe::App for App {
         if self.bubble.as_ref().is_some_and(|b| t > b.hide_at) {
             self.bubble = None;
         }
+        // You're typing in the terminal you last prompted from: input arrives while the mouse stays still (Windows only;
+        // which key is never read). A few inputs in a row start the cheer, so a lone click doesn't; then any key keeps it going.
+        let (input, cursor) = (os::last_input(), os::cursor(1.0));
+        if input != self.last_input && cursor == self.last_cursor && self.terminal != 0 && os::foreground() == self.terminal {
+            self.keys.retain(|k| t - k < 1.5);
+            self.keys.push(t);
+            if self.keys.len() >= 4 || t - self.typed_at < TYPING_SHOWS {
+                self.typed_at = t;
+            }
+        }
+        (self.last_input, self.last_cursor) = (input, cursor);
+        let cheering = matches!(self.pose, Pose::Idle | Pose::Working) && (t - self.typed_at < TYPING_SHOWS || t < self.cheer_until);
+        if cheering && t - self.cheer_said > CHEER_LINE_EVERY && !self.playing() && self.tour.is_none() {
+            self.cheer_said = t;
+            let line = { let l = i18n::lines().cheer; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+            self.say(line.into(), None, t - 4.0);
+        }
         // Working with nothing to say (Claude thinking, rewrite not back yet): a general line that expires after
         // FILLER_EVERY, so the next frame swaps in another until real activity or the reply arrives.
         if self.pose == Pose::Working && self.bubble.is_none() && !self.playing() && self.tour.is_none() {
@@ -1059,6 +1095,9 @@ impl eframe::App for App {
         if self.pose == Pose::Idle && t - self.finished_at < FINISHED_FLASH && !game_shown {
             pose = Pose::Waiting;
         }
+        if cheering && !game_shown {
+            pose = Pose::Cheer;
+        }
         if poke_t.is_some() {
             pose = Pose::Poke;
         }
@@ -1095,7 +1134,7 @@ impl eframe::App for App {
             self.music = Some(true);
         }
         // Idle with nothing on screen for a while: sparkle and offer to help. Not while music plays: that's chill time.
-        if self.pose != Pose::Idle || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.playing() {
+        if self.pose != Pose::Idle || cheering || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.playing() {
             self.nudge_at = t + IDLE_NUDGE;
         } else if t > self.nudge_at {
             let line = { let l = i18n::lines().idle; l[(self.rand01() * l.len() as f32) as usize % l.len()] };

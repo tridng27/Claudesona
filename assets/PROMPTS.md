@@ -1,6 +1,6 @@
 # Claudesona art prompts
 
-Ten images (plus one optional blink), made with any AI image tool that accepts a reference image.
+Thirteen images (one blink is optional), made with any AI image tool that accepts a reference image.
 
 ## Steps
 
@@ -60,7 +60,19 @@ Tips for this one:
 ### 11. `game_pouty.png` (you won the game)
 > [Character] Same character as the reference image. She just lost a game to the viewer and is a bit sad but a good sport: eyes slightly teary and glancing to the side, small pout with her bottom lip pushed out, cheeks lightly puffed and blushing, brows tilted up in the middle, hands clasped behind her back, shoulders a little slumped. Disappointed but cute, not crying. Same standing position and body size as the reference, feet together on the same spot. [Style]
 
-If one of these is missing (e.g. in a custom skin), the app borrows another pose: idle for excited, waiting for smug, poke for pouty.
+If one of these is missing (e.g. in a custom skin), the app borrows another pose: idle for excited, waiting for smug, poke for pouty, waiting for cheer.
+
+### 12. `cheer.png` (shown while you type into a Claude session)
+> [Character] Same character as the reference image. She is cheering the viewer on while they work, like an enthusiastic little supporter: her right arm (on the viewer's left) thrust straight up high above her head in a big "you can do it!" pose, hand in a small happy fist, sleeve slipping down a little toward her elbow. The raised arm and fist are well away from her hair and face, with clear empty space around them. Her left hand rests on her hip. Bright wide-open sparkling eyes looking at the viewer, a big open-mouthed encouraging smile, rosy cheeks, shoulders lifted with energy. No pom-poms, no props, nothing added beyond the reference outfit. Same standing position and body size as the reference, feet together on the same spot. [Style]
+
+### 13. `cheer_blink.png` (edit of cheer.png)
+> Edit this image: close her eyes into happy curved lines, like ^ ^, keeping the big smile and raised arm. Change nothing else.
+
+Tips for this one:
+- Her raised arm must not overlap her hair. The app bends each pose on a grid, so overlapping parts would warp together. If the tool tucks the arm in close, regenerate.
+- If the tool raises both arms anyway, regenerate.
+- Make sure the fist stays inside the canvas with some margin above it. A raised arm is easy to crop.
+- Don't let her feet rise off the ground or move: the app lines her up by her feet.
 
 ## Not needed
 
