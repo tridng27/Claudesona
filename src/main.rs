@@ -259,6 +259,7 @@ struct App {
     playlist_name: String,     // remembered: the playlist to play
     game: Option<game::Game>,
     sudoku: Option<sudoku::Sudoku>,
+    picking: bool, // "Play with me" asked which game
     game_loading: bool,
     recent_words: Vec<String>,  // so new rounds don't repeat
     game_line: String, // what she's saying in the game panel
@@ -376,6 +377,7 @@ impl App {
             lang,
             game: None,
             sudoku: None,
+            picking: false,
             game_loading: false,
             recent_words: vec![],
             game_line: String::new(),
@@ -452,7 +454,7 @@ impl App {
 
     /// Asks Haiku for a word on a worker thread; the panel shows "thinking" until it arrives.
     fn start_game(&mut self) {
-        (self.game, self.game_loading, self.tour, self.sudoku) = (None, true, None, None);
+        (self.game, self.game_loading, self.tour, self.sudoku, self.picking) = (None, true, None, None, false);
         self.game_line = game::line(i18n::lines().thinking, self.rand01(), "");
         voice::say(&self.game_line, voice::Mode::Chatter);
         let (tx, wake, avoid) = (self.outbox.clone(), self.ctx.clone(), self.recent_words.clone());
@@ -466,15 +468,43 @@ impl App {
 
     /// A fresh puzzle, made right here: it takes well under a millisecond.
     fn start_sudoku(&mut self) {
-        (self.game, self.game_loading, self.tour) = (None, false, None);
+        (self.game, self.game_loading, self.tour, self.picking) = (None, false, None, false);
         self.sudoku = Some(sudoku::Sudoku::new((self.rand01() * 1_000_000.0) as u32));
         self.game_line = game::line(i18n::lines().sudoku_start, self.rand01(), "");
         voice::say(&self.game_line, voice::Mode::Chatter);
     }
 
-    /// A game panel is open (or a hangman word is on its way).
+    /// A game panel is open (or a hangman word is on its way, or she's asking which game).
     fn playing(&self) -> bool {
-        self.game.is_some() || self.game_loading || self.sudoku.is_some()
+        self.picking || self.game.is_some() || self.game_loading || self.sudoku.is_some()
+    }
+
+    /// "Play with me": a small panel asking which game, with a button for each and a close.
+    fn game_picker(&mut self, ui: &egui::Ui, painter: &Painter, anchor: Pos2) {
+        let text = i18n::ui();
+        let panel = Rect::from_min_size(anchor - vec2(110.0, 92.0), vec2(220.0, 88.0));
+        painter.rect(panel, 10.0, CREAM, Stroke::new(2.0, CORAL), egui::StrokeKind::Inside);
+        self.hit_rects.push(panel);
+        painter.text(pos2(panel.center().x, panel.top() + 18.0), egui::Align2::CENTER_CENTER, text.pick_game, FontId::proportional(13.5), INK);
+        let mut chosen = None;
+        for (i, label) in [text.hangman, text.sudoku].into_iter().enumerate() {
+            let r = Rect::from_center_size(pos2(panel.center().x + (i as f32 - 0.5) * 100.0, panel.top() + 50.0), vec2(92.0, 26.0));
+            let resp = ui.interact(r, ui.scope_id().with(("pick-game", i)), Sense::click());
+            painter.rect(r, 8.0, CORAL.gamma_multiply(if resp.hovered() { 0.3 } else { 0.15 }), Stroke::new(1.0, CORAL), egui::StrokeKind::Inside);
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, label, FontId::proportional(13.0), INK);
+            if resp.clicked() {
+                chosen = Some(i);
+            }
+        }
+        let close = Rect::from_center_size(pos2(panel.center().x, panel.bottom() - 11.0), vec2(60.0, 16.0));
+        let close_resp = ui.interact(close, ui.scope_id().with("pick-close"), Sense::click());
+        painter.text(close.center(), egui::Align2::CENTER_CENTER, text.close, FontId::proportional(11.5), if close_resp.hovered() { INK } else { SOFT_INK });
+        match chosen {
+            Some(0) => self.start_game(),
+            Some(_) => self.start_sudoku(),
+            None if close_resp.clicked() => self.picking = false,
+            None => {}
+        }
     }
 
     /// Her line, the 9x9 grid, and beside it a 1-9 pad and the buttons. Click a cell, then a number.
@@ -656,11 +686,7 @@ impl App {
                 close = true;
             }
             if ui.button(text.play_with_me).clicked() {
-                self.start_game();
-                close = true;
-            }
-            if ui.button(text.sudoku).clicked() {
-                self.start_sudoku();
+                (self.picking, self.tour) = (true, None);
                 close = true;
             }
             if ui.button(text.what_can_i_do).clicked() {
@@ -1345,7 +1371,10 @@ impl eframe::App for App {
             self.playlist_open = false;
         }
 
-        if game_shown && self.sudoku.is_some() {
+        if game_shown && self.picking {
+            self.game_picker(ui, painter, anchor);
+            list_shown = true;
+        } else if game_shown && self.sudoku.is_some() {
             self.sudoku_panel(ui, painter, anchor, t);
             list_shown = true;
         } else if game_shown {

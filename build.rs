@@ -16,4 +16,18 @@ fn main() {
     // Whose voice it is, so chat and replies can be spoken live in the same voice.
     let id = std::fs::read_to_string(dir.join("voice_id.txt")).unwrap_or_default();
     std::fs::write(out_dir.join("voice_id.rs"), format!("{:?}", id.trim())).unwrap();
+
+    // Her bundled songs: assets/songs/<Artist> - <Title>.mp3 (credits in assets/songs/CREDITS.md).
+    println!("cargo:rerun-if-changed=assets/songs");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("songs");
+    let mut files: Vec<_> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "mp3")).collect();
+    files.sort();
+    let mut out = String::from("&[\n");
+    for f in files {
+        let stem = f.file_stem().unwrap().to_string_lossy().into_owned();
+        let (artist, title) = stem.split_once(" - ").unwrap_or_else(|| panic!("{stem}: name songs \"Artist - Title.mp3\""));
+        out.push_str(&format!("    ({title:?}, {artist:?}, include_bytes!({:?}) as &[u8]),\n", f.display().to_string()));
+    }
+    out.push(']');
+    std::fs::write(out_dir.join("songs.rs"), out).unwrap();
 }

@@ -21,16 +21,13 @@ She watches your Claude Code session and changes pose with it:
 
 After 5 quiet minutes she puts on music by herself, or pick **Play music** from her right-click menu. A small player sits above her head: song name, time, a progress bar you can click to jump, previous, play/pause, next, the song list and stop.
 
-There are six slow, chill songs, each with a written melody that phrases like sung lyrics. They're synthesized inside the app while it runs. There are no audio files and no downloads, so there's nothing to license:
+Her playlist, "Claudesona's songs", has 19 songs built into the app. The player and the song list show each one as "Title · Artist":
 
-| Song | Feel |
-| :- | :- |
-| Rainy Window Seat | classic lofi hip-hop: dusty wobbly electric piano, heavy swing, pumping beat |
-| Last Bus Home | vibraphone chords, piano melody, soft boom-bap |
-| Sunday Matcha | piano and music box, soft shaker |
-| Night Shift Neon | warm pad and electric piano, slow R&B groove, deep 808 bass |
-| Letters Never Sent | slow ballad, strings and flute |
-| Moonlit Walk Home | slow ballad, piano |
+- **8 lofi songs by [HoliznaCC0](https://holiznacc0.bandcamp.com)**, released into the public domain (CC0) and found on [OpenGameArt](https://opengameart.org/content/chill-beats-collection): City In The Rearview, Families, Opinions, Dream Pop, Autumn, Seasons Change, Mixed Signals and Static. Thank you, Holizna!
+- **Matcha Steam**, a lofi R&B song made for Claudesona.
+- **10 songs she synthesizes herself** while she plays, each with a written melody that phrases like sung lyrics: Rainy Window Seat, Last Bus Home, Sunday Matcha, Night Shift Neon, Letters Never Sent, Moonlit Walk Home, Library Window Light, Cat Nap Afternoon, Midnight Ramen and Snowfall Study Hall.
+
+Full credits, licenses and sources are in [`assets/songs/CREDITS.md`](assets/songs/CREDITS.md).
 
 #### Your own songs and playlists
 
@@ -54,7 +51,7 @@ Your playlist and mode are remembered.
 
 ### Plays with you
 
-Pick **Play with me** and she starts a game of hangman. Claude (Haiku) picks a word and writes a hint, and you guess by clicking letters. You get six hearts. She cheers, teases and reacts to every guess, looks smug when she wins, and sulks a little when you do.
+Pick **Play with me** and she asks what to play: **Hangman** or **Sudoku**. In hangman, Claude (Haiku) picks a word and writes a hint, and you guess by clicking letters. You get six hearts. She cheers, teases and reacts to every guess, looks smug when she wins, and sulks a little when you do. In sudoku she makes a fresh 9×9 puzzle each time: click a square, then a number. A number that repeats in its row, column or box turns red.
 
 <p align="center"><img src="docs/game.gif" alt="A round of the word game: the player wins with PILLOW and she pouts, then loses on RAINBOW and she looks smug" width="330"></p>
 
@@ -103,7 +100,7 @@ Run `claudesona uninstall`. It removes her hooks (and nothing else) from `settin
   - **Play music** / **Stop music**
   - **While working**: show her working pose or her music pose while Claude works
   - **Open music folder**: add your own songs and playlists
-  - **Play with me**: the word game
+  - **Play with me**: hangman or sudoku
   - **What can I do**: she introduces herself and shows each of her poses
   - **Hide for 10 min**: she keeps following Claude, invisible and click-through
   - **Quit**: until the next Claude Code session

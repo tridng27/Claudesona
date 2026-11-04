@@ -10,6 +10,56 @@ const RATE: usize = 22_050;
 const BARS: usize = 32; // 1:30 to 2:00 per track
 // Her voice sits under the music, never over it: the mp3s peak near full scale, the music around 0.6.
 const VOICE_VOLUME: f32 = 0.3;
+// While she talks, the music goes muffled (low-passed) and a little quieter, so her words come through.
+static MUFFLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const MUFFLE_HZ: f32 = 900.0; // low-pass cutoff at full muffle
+const MUFFLE_DIP: f32 = 0.25; // volume taken off at full muffle
+const MUFFLE_FADE: f32 = 0.15; // seconds to go muffled and back
+
+/// Music source wrapper that eases into a low-pass and a small dip while MUFFLED is set, and back out after.
+struct Muffle<S> {
+    input: S,
+    lp: [f32; 8], // filter state per channel
+    amount: f32,  // 0 = clear, 1 = fully muffled
+    ch: usize,    // channel of the next sample
+}
+
+impl<S: rodio::Source> Iterator for Muffle<S> {
+    type Item = rodio::Sample;
+    fn next(&mut self) -> Option<rodio::Sample> {
+        let x = self.input.next()?;
+        let (channels, rate) = (self.input.channels().get() as usize, self.input.sample_rate().get() as f32);
+        let target = if MUFFLED.load(std::sync::atomic::Ordering::Relaxed) { 1.0 } else { 0.0 };
+        self.amount += (target - self.amount) / (MUFFLE_FADE * rate * channels as f32);
+        let c = self.ch % 8;
+        self.lp[c] += (1.0 - (-TAU * MUFFLE_HZ / rate).exp()) * (x - self.lp[c]);
+        self.ch = (self.ch + 1) % channels.max(1);
+        Some((x + (self.lp[c] - x) * self.amount) * (1.0 - MUFFLE_DIP * self.amount))
+    }
+}
+
+impl<S: rodio::Source> rodio::Source for Muffle<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        self.input.current_span_len()
+    }
+    fn channels(&self) -> rodio::ChannelCount {
+        self.input.channels()
+    }
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.input.sample_rate()
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        self.input.total_duration()
+    }
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        self.ch = 0; // seeking lands on a frame boundary
+        self.input.try_seek(pos)
+    }
+}
+
+fn muffle<S: rodio::Source>(input: S) -> Muffle<S> {
+    Muffle { input, lp: [0.0; 8], amount: if MUFFLED.load(std::sync::atomic::Ordering::Relaxed) { 1.0 } else { 0.0 }, ch: 0 }
+}
 
 // Chords as MIDI notes, root first.
 const FMAJ_EM_DM_CMAJ: [&[f32]; 4] = [&[53., 57., 60., 64.], &[52., 55., 59., 62.], &[50., 53., 57., 60.], &[48., 52., 55., 59.]];
@@ -245,16 +295,22 @@ impl Mode {
     }
 }
 
+// Songs compiled into the exe from assets/songs (see build.rs): (title, artist, mp3 bytes).
+static SONGS: &[(&str, &str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/songs.rs"));
+
 #[derive(Clone, PartialEq, Debug)]
 enum Song {
-    Synth(usize),  // one of TRACKS
-    File(PathBuf), // from the music folder
+    Bundled(usize), // one of SONGS
+    Synth(usize),   // one of TRACKS
+    File(PathBuf),  // from the music folder
 }
 
 impl Song {
+    /// Built-in songs carry their artist's credit; the synthesized ones are hers.
     fn title(&self) -> String {
         match self {
-            Song::Synth(i) => TRACKS[*i].name.to_string(),
+            Song::Bundled(i) => format!("{} · {}", SONGS[*i].0, SONGS[*i].1),
+            Song::Synth(i) => format!("{} · Claudesona", TRACKS[*i].name),
             Song::File(p) => p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
         }
     }
@@ -283,7 +339,8 @@ fn scan(dir: &Path) -> Vec<Playlist> {
         v.sort();
         v.into_iter().map(Song::File).collect::<Vec<_>>()
     };
-    let mut lists = vec![Playlist { name: BUILT_IN.into(), songs: (0..TRACKS.len()).map(Song::Synth).collect() }];
+    let built_in = (0..SONGS.len()).map(Song::Bundled).chain((0..TRACKS.len()).map(Song::Synth)).collect();
+    let mut lists = vec![Playlist { name: BUILT_IN.into(), songs: built_in }];
     let loose = files(dir);
     if !loose.is_empty() {
         lists.push(Playlist { name: LOOSE.into(), songs: loose });
@@ -459,12 +516,18 @@ impl Deck {
                 let pcm = &self.synth.as_ref().unwrap().1;
                 self.len = pcm.len() as f32 / RATE as f32;
                 let (mono, rate) = (std::num::NonZero::new(1).unwrap(), std::num::NonZero::new(RATE as u32).unwrap());
-                player.append(rodio::buffer::SamplesBuffer::new(mono, rate, pcm.clone()));
+                player.append(muffle(rodio::buffer::SamplesBuffer::new(mono, rate, pcm.clone())));
+            }
+            Song::Bundled(i) => {
+                let bytes = SONGS[*i].2;
+                let decoder = rodio::Decoder::builder().with_data(std::io::Cursor::new(bytes)).with_byte_len(bytes.len() as u64).with_hint("mp3").build().map_err(|_| ())?;
+                self.len = decoder.total_duration().map_or(0.0, |d| d.as_secs_f32());
+                player.append(muffle(decoder));
             }
             Song::File(p) => {
                 let decoder = rodio::Decoder::try_from(std::fs::File::open(p).map_err(|_| ())?).map_err(|_| ())?;
                 self.len = decoder.total_duration().map_or(0.0, |d| d.as_secs_f32());
-                player.append(decoder);
+                player.append(muffle(decoder));
             }
         }
         if at > 0.0 {
@@ -582,6 +645,7 @@ fn player(rx: Receiver<Cmd>) {
         if voice.as_ref().is_some_and(|v| v.empty()) {
             voice = None;
         }
+        MUFFLED.store(voice.is_some(), std::sync::atomic::Ordering::Relaxed);
         // Start the chosen song; if a file won't play, try the next ones (each at most once).
         // If nothing in the playlist plays, fall back to her own songs rather than going silent.
         if let Some((mut s, at)) = start {
@@ -1089,6 +1153,28 @@ mod tests {
     }
 
     #[test]
+    fn muffle_softens_highs_and_leaves_clear_music_alone() {
+        let tone = |hz: f32| -> Vec<f32> { (0..441).map(|i| (TAU * hz * i as f32 / 44_100.0).sin()).collect() };
+        let run = |amount: f32, hz: f32| {
+            let src = rodio::buffer::SamplesBuffer::new(std::num::NonZero::new(1).unwrap(), std::num::NonZero::new(44_100).unwrap(), tone(hz));
+            let out: Vec<f32> = Muffle { input: src, lp: [0.0; 8], amount, ch: 0 }.collect();
+            (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt()
+        };
+        let full = (0.5f32).sqrt(); // a sine's RMS
+        assert!(run(1.0, 5000.0) < 0.2 * full); // 10ms: still almost fully muffled, highs mostly gone
+        assert!((run(0.0, 5000.0) - full).abs() < 0.02 || MUFFLED.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn bundled_songs_decode_with_a_length() {
+        for (title, artist, bytes) in SONGS {
+            let d = rodio::Decoder::builder().with_data(std::io::Cursor::new(*bytes)).with_byte_len(bytes.len() as u64).with_hint("mp3").build();
+            let secs = d.ok().and_then(|d| rodio::Source::total_duration(&d)).map_or(0.0, |t| t.as_secs_f32());
+            assert!(secs > 60.0, "{title} by {artist}: {secs}s");
+        }
+    }
+
+    #[test]
     fn folders_become_playlists() {
         let dir = std::env::temp_dir().join(format!("claudesona-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1099,7 +1185,7 @@ mod tests {
         let lists = scan(&dir);
         let names: Vec<_> = lists.iter().map(|l| (l.name.as_str(), l.songs.iter().map(Song::title).collect::<Vec<_>>())).collect();
         assert_eq!(names[0].0, BUILT_IN);
-        assert_eq!(names[0].1.len(), TRACKS.len());
+        assert_eq!(names[0].1.len(), SONGS.len() + TRACKS.len());
         assert_eq!(names[1], (LOOSE, vec!["a".to_string(), "b".to_string()]));
         assert_eq!(names[2], ("Chill", vec!["1".to_string(), "2".to_string()]));
         assert_eq!(names.len(), 3); // no playlist for a folder without audio
