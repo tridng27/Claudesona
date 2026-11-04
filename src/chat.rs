@@ -227,6 +227,9 @@ fn or_none(s: &str) -> &str {
 
 /// Adds the turn, then asks Haiku to fold old turns into the summary and update the facts.
 fn remember(msg: &str, said: &str, qv: &[f32]) {
+    // One at a time: two quick chats would each update from the same old memory, and the later save would undo the first.
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let input = {
         let mut m = memory();
         m.turns.push((msg.to_string(), said.to_string()));

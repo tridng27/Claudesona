@@ -174,19 +174,24 @@ pub fn watch(emit: impl Fn(&PathBuf, Event)) {
             if len(&path) <= *pos {
                 continue;
             }
-            let mut bytes = Vec::new();
-            let Ok(mut f) = File::open(&path) else { continue };
-            if f.seek(SeekFrom::Start(*pos)).is_err() || f.read_to_end(&mut bytes).is_err() {
-                continue;
-            }
-            // Only consume whole lines; a half-written last line is read again next round.
-            let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else { continue };
-            *pos += end as u64 + 1;
-            for ev in String::from_utf8_lossy(&bytes[..end]).lines().flat_map(parse_line) {
+            let Some((text, next)) = read_new(&path, *pos) else { continue };
+            *pos = next;
+            for ev in text.lines().flat_map(parse_line) {
                 emit(&path, ev);
             }
         }
     }
+}
+
+/// The whole lines written after byte `pos`, and where the next read starts. A half-written last line is
+/// left for next time. None if there's no complete new line yet (or the file can't be read).
+fn read_new(path: &PathBuf, pos: u64) -> Option<(String, u64)> {
+    let mut bytes = Vec::new();
+    let mut f = File::open(path).ok()?;
+    f.seek(SeekFrom::Start(pos)).ok()?;
+    f.read_to_end(&mut bytes).ok()?;
+    let end = bytes.iter().rposition(|b| *b == b'\n')?;
+    Some((String::from_utf8_lossy(&bytes[..end]).into_owned(), pos + end as u64 + 1))
 }
 
 fn len(p: &PathBuf) -> u64 {
@@ -247,6 +252,18 @@ mod tests {
         // When it ends mid-turn, the notification only shows up as a queued attachment.
         let queued = r#"{"parentUuid":"b0","isSidechain":false,"attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>a92510ec3180d73c5</task-id>\n<tool-use-id>a3</tool-use-id>\n<status>completed</status>\n<summary>Agent \"Review\" completed</summary>\n</task-notification>"},"type":"attachment"}"#;
         assert_eq!(parse_line(queued), vec![Event::ShellDone("a92510ec3180d73c5".into()), Event::AgentDone("a3".into())]);
+    }
+
+    #[test]
+    fn reads_only_whole_lines() {
+        let path = std::env::temp_dir().join(format!("claudesona-log-test-{}.jsonl", std::process::id()));
+        std::fs::write(&path, "{\"a\":1}\n{\"b\":").unwrap();
+        let (text, pos) = read_new(&path, 0).unwrap();
+        assert_eq!((text.as_str(), pos), ("{\"a\":1}", 8)); // the half line waits
+        assert_eq!(read_new(&path, pos), None);
+        std::fs::write(&path, "{\"a\":1}\n{\"b\":2}\n").unwrap(); // the writer finishes it
+        assert_eq!(read_new(&path, pos), Some(("{\"b\":2}".to_string(), 16)));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -48,6 +48,7 @@ pub struct Ui {
     pub new_puzzle: &'static str,
     pub erase: &'static str,
     pub what_can_i_do: &'static str,
+    pub give_coffee: &'static str,
     pub hide: &'static str,
     pub quit: &'static str,
     pub hint: &'static str,
@@ -106,6 +107,7 @@ const EN_UI: Ui = Ui {
     new_puzzle: "New puzzle",
     erase: "Erase",
     what_can_i_do: "What can I do",
+    give_coffee: "Give her coffee ☕",
     hide: "Hide for 10 min",
     quit: "Quit",
     hint: "Hint: ",
@@ -164,6 +166,7 @@ const VI_UI: Ui = Ui {
     new_puzzle: "Câu đố mới",
     erase: "Xoá",
     what_can_i_do: "Tớ làm được gì",
+    give_coffee: "Mời tớ cà phê ☕",
     hide: "Ẩn 10 phút",
     quit: "Thoát",
     hint: "Gợi ý: ",
@@ -219,6 +222,8 @@ pub struct Lines {
     pub bye: &'static [&'static str], // the Claude session she follows closed
     pub working: &'static [&'static str], // while working with nothing else to say, swapped every 3s
     pub poke: &'static [&'static str],
+    pub dizzy: &'static [&'static str], // shaken around while you drag her
+    pub coffee: &'static [&'static str], // you gave her coffee
     pub waiting: &'static [&'static str],
     pub music: &'static [&'static str],
     pub cheer: &'static [&'static str], // you're typing a prompt
@@ -274,6 +279,22 @@ const EN_LINES: Lines = Lines {
         "Again?! You're sooo mean~ (T_T)",
         "Fine, fine, I'm listening… (￣ー￣)",
     ],
+    dizzy: &[
+        "Wooah~ the world is spinning… (@_@)",
+        "Stooop shaking me~ I'm so dizzy! (×_×)",
+        "Everything is going round and round… (@_@)",
+        "Ugh… which way is up? (@~@)",
+        "So many stars… your sidekick needs to sit down~ (＠_＠)",
+        "Whoa whoa whoa~ put me dooown! (>﹏<)",
+        "My tummy's doing flips… be gentle with me~ (×﹏×)",
+    ],
+    coffee: &[
+        "Coffee?! For me? You're the best~! (♡▽♡)",
+        "Mmm~ warm and cozy… thank you! ♡",
+        "Sip sip~ your sidekick is fully recharged! (≧▽≦)",
+        "Hehe, now I can work all day with you~ ☕",
+        "Best gift ever~ I love you a latte! (◕‿◕)♡",
+    ],
     waiting: &[
         "I need your OK~! (°ロ°)",
         "Heyyy~ Claude needs your permission! ☆",
@@ -303,6 +324,8 @@ const EN_LINES: Lines = Lines {
         (Pose::Idle, "When Claude finishes, your sidekick tells you the answer in my own words~ Click my bubble to read more! ✧"),
         (Pose::Cheer, "When you type a new prompt, your sidekick cheers you on! You got this~! ☆"),
         (Pose::Poke, "Poke me and I get grumpy… (￣^￣) but double-click me and I'll bring your terminal back!"),
+        (Pose::Held, "Grab me by my sweater and drag me anywhere! I'll dangle and swing along with your mouse~ (≧▽≦)"),
+        (Pose::Dizzy, "But don't shake me too much… or I'll get sooo dizzy! (@_@)"),
         (Pose::Music, "When it's quiet for a while, I play music for you~ ♪ Add your own playlists too!"),
         (Pose::Excited, "Bored? Pick \"Play with me\" and we'll play a word-guessing game! I get sooo excited~ (★ω★)"),
         (Pose::Smug, "If your sidekick wins, you'll see this face. Hehehe~ (¬‿¬)"),
@@ -435,6 +458,22 @@ const VI_LINES: Lines = Lines {
         "Lại nữa hả?! Cậu ác quááá~ (T_T)",
         "Rồi rồi, tớ nghe đây… (￣ー￣)",
     ],
+    dizzy: &[
+        "Ôi~ cả thế giới đang quay mòng mòng… (@_@)",
+        "Đừng lắc tớ nữaaa~ tớ chóng mặt quá! (×_×)",
+        "Mọi thứ cứ xoay xoay xoay… (@_@)",
+        "Ư… đâu là trên, đâu là dưới vậy? (@~@)",
+        "Nhiều sao quá… phụ tá cần ngồi xuống chút~ (＠_＠)",
+        "Khoan khoan khoan~ thả tớ xuốnggg! (>﹏<)",
+        "Bụng tớ lộn nhào rồi… nhẹ tay thôi cậu ơi~ (×﹏×)",
+    ],
+    coffee: &[
+        "Cà phê hả?! Cho tớ thật hả? Cậu tốt quá đi~! (♡▽♡)",
+        "Ưm~ ấm áp ghê… cảm ơn cậu nha! ♡",
+        "Nhâm nhi nhâm nhi~ phụ tá sạc đầy năng lượng rồi! (≧▽≦)",
+        "Hì hì, giờ tớ làm việc với cậu cả ngày luôn~ ☕",
+        "Món quà tuyệt nhất luôn~ thương cậu nhiều lắm! (◕‿◕)♡",
+    ],
     waiting: &[
         "Cậu ơi, tớ cần cậu đồng ý nè~! (°ロ°)",
         "Cậu ơiii~ Claude đang xin phép cậu kìa! ☆",
@@ -464,6 +503,8 @@ const VI_LINES: Lines = Lines {
         (Pose::Idle, "Khi Claude xong việc, phụ tá sẽ kể lại câu trả lời bằng lời của tớ~ Bấm vào bong bóng chat của tớ để đọc thêm nha! ✧"),
         (Pose::Cheer, "Khi cậu gõ lệnh mới, phụ tá sẽ cổ vũ cậu nè! Cố lên cậu ơi~! ☆"),
         (Pose::Poke, "Cậu chọc là tớ dỗi đó… (￣^￣) nhưng bấm đúp vào tớ là tớ mở lại terminal cho cậu liền!"),
+        (Pose::Held, "Cậu nắm áo len kéo tớ đi đâu cũng được nha! Tớ sẽ đung đưa theo chuột của cậu~ (≧▽≦)"),
+        (Pose::Dizzy, "Nhưng đừng lắc tớ mạnh quá… không là tớ chóng mặt lắm đó! (@_@)"),
         (Pose::Music, "Khi yên tĩnh một lúc, tớ sẽ mở nhạc cho cậu nghe~ ♪ Cậu thêm playlist riêng cũng được nha!"),
         (Pose::Excited, "Chán hả? Chọn \"Chơi với tớ\" là mình chơi đoán chữ nè! Tớ háo hức quááá~ (★ω★)"),
         (Pose::Smug, "Nếu phụ tá thắng, cậu sẽ thấy gương mặt này. Hihihi~ (¬‿¬)"),
@@ -570,7 +611,7 @@ pub fn lines() -> &'static Lines {
 pub fn voiced() -> Vec<(&'static str, &'static str)> {
     let mut out = vec![];
     for (l, code) in [(&EN_LINES, "en"), (&VI_LINES, "vi")] {
-        for set in [l.waiting, l.working, l.idle, l.poke, l.music, l.cheer, l.bye, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
+        for set in [l.waiting, l.working, l.idle, l.poke, l.dizzy, l.coffee, l.music, l.cheer, l.bye, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
             out.extend(set.iter().filter(|s| !s.contains('{')).map(|s| (*s, code)));
         }
         out.extend(l.tour.iter().map(|(_, s)| (*s, code)));
@@ -618,7 +659,7 @@ mod tests {
     #[test]
     fn both_languages_have_every_line_set() {
         for l in [&EN_LINES, &VI_LINES] {
-            for set in [l.idle, l.bye, l.working, l.poke, l.waiting, l.music, l.cheer, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
+            for set in [l.idle, l.bye, l.working, l.poke, l.dizzy, l.coffee, l.waiting, l.music, l.cheer, l.thinking, l.start, l.hit, l.miss, l.last_heart, l.player_won, l.player_lost, l.sudoku_start, l.sudoku_won] {
                 assert!(set.len() >= 3);
             }
             assert!(l.commands.iter().all(|c| c.len() >= 3));

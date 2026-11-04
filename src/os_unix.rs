@@ -37,6 +37,11 @@ pub fn cursor(_native_ppp: f32) -> Option<(f32, f32)> {
     })
 }
 
+/// Unknown here: the caller asks egui instead.
+pub fn mouse_down() -> Option<bool> {
+    None
+}
+
 /// Whether her see-through parts can let clicks through. Not on a Wayland session: XWayland only reports the cursor
 /// over X windows, so once clicks pass through her she'd never notice the cursor coming back.
 pub fn click_through() -> bool {

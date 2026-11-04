@@ -5,7 +5,7 @@ use eframe::egui::{Rect, pos2};
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute};
 use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetLastInputInfo, LASTINPUTINFO, VK_LBUTTON, VK_RBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow, SPI_GETWORKAREA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, WM_NCCALCSIZE, WNDPROC,
@@ -15,6 +15,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 pub fn cursor(_native_ppp: f32) -> Option<(f32, f32)> {
     let mut p = POINT { x: 0, y: 0 };
     (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x as f32, p.y as f32))
+}
+
+/// Whether a mouse button is held. The OS drag loop swallows the release, so egui never sees it.
+pub fn mouse_down() -> Option<bool> {
+    // Both buttons, because "swap mouse buttons" makes the right one primary.
+    Some(unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 || GetAsyncKeyState(VK_RBUTTON as i32) < 0 })
 }
 
 /// Her see-through parts always let clicks through on Windows.

@@ -39,6 +39,11 @@ const FINISHED_FLASH: f32 = 2.5; // seconds of Waiting pose when work is confirm
 const TYPING_SHOWS: f32 = 1.5; // seconds she keeps cheering after your last keystroke
 const CHEER_ON_SEND: f32 = 2.5; // seconds she cheers when your prompt reaches the log
 const CHEER_LINE_EVERY: f32 = 20.0; // at most one cheer line this often
+const SWING_ROOM: f32 = 140.0; // see-through window room on each side, so a big swing isn't cut off
+const COFFEE_FOR: f32 = 8.0; // seconds she sips after you give her coffee
+const DIZZY_AT: f32 = 8.0; // dragged this far (in her heights, less what's worn off) and she gets dizzy
+const DIZZY_WEARS_OFF: f32 = 2.0; // heights per second
+const DIZZY_FOR: f32 = 4.0; // seconds she stays dizzy
 const REWRITE_TIMEOUT: f32 = 30.0;
 const CREAM: Color32 = Color32::from_rgb(0xFB, 0xF4, 0xEA);
 const CORAL: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
@@ -57,10 +62,10 @@ const LANG_KEY: &str = "lang"; // EN or VI
 
 enum Msg {
     Log(PathBuf, Event),
-    Rewritten { short: String, long: Option<String> },
+    Rewritten { short: String, long: Option<String>, at: f32 }, // `at`: when its reply arrived, to match it
     Game { word: String, hint: String }, // a new hangman word from Haiku
     Chat(Option<(String, Option<String>)>), // her answer to your chat message (None: `claude` failed)
-    Partial { chat: bool, short: String }, // the short answer so far, streaming in (chat, or a reply rewrite)
+    Partial { reply: Option<f32>, short: String }, // the short answer so far, streaming in (chat: None, or the rewrite of the reply that arrived at that time)
     Hook(serde_json::Value), // from `claudesona hook`, or {"quit":true} from install/uninstall
 }
 
@@ -125,6 +130,11 @@ fn asset(name: &str) -> Option<&'static [u8]> {
         "game_pouty" => include_bytes!("../assets/game_pouty.png"),
         "cheer" => include_bytes!("../assets/cheer.png"),
         "cheer_blink" => include_bytes!("../assets/cheer_blink.png"),
+        "held" => include_bytes!("../assets/held.png"),
+        "held_blink" => include_bytes!("../assets/held_blink.png"),
+        "held_dizzy" => include_bytes!("../assets/held_dizzy.png"),
+        "coffee" => include_bytes!("../assets/coffee.png"),
+        "coffee_blink" => include_bytes!("../assets/coffee_blink.png"),
         _ => return None,
     })
 }
@@ -190,13 +200,13 @@ fn install_fonts(ctx: &egui::Context) {
 }
 
 /// Draws a pose image bent by the animation, standing on `feet`.
-fn draw_sprite(painter: &Painter, tex: &TextureHandle, feet: Pos2, height: f32, t: f32, pose: Pose, poke_t: f32) {
+fn draw_sprite(painter: &Painter, tex: &TextureHandle, feet: Pos2, height: f32, t: f32, pose: Pose, poke_t: f32, swing: Vec2) {
     let mut mesh = Mesh::with_texture(tex.id());
     let (gx, gy) = GRID;
     for j in 0..=gy {
         for i in 0..=gx {
             let (u, v) = (i as f32 / gx as f32, j as f32 / gy as f32);
-            let p = anim::warp(u, v, t, pose, poke_t, tex.aspect_ratio());
+            let p = anim::warp(u, v, t, pose, poke_t, tex.aspect_ratio(), swing);
             mesh.vertices.push(egui::epaint::Vertex { pos: feet + vec2(p.x, p.y) * height, uv: pos2(u, v), color: Color32::WHITE });
         }
     }
@@ -232,6 +242,12 @@ struct App {
     pose: Pose,
     start: Instant,
     poke_at: Option<f32>,
+    held: bool,  // you're dragging her
+    swing: Vec2, // her pendulum while held: angle in degrees, speed in rad/s
+    coffee_until: f32, // sipping the coffee you gave her until then
+    dizzy: f32,       // how shaken she is, in heights dragged
+    dizzy_until: f32, // seeing stars until then
+    hold: Option<(Pos2, f32, f32)>, // while we move the window ourselves: last cursor (screen points), its sideways speed, time
     blink_at: f32,
     rng: u64,
     inbox: Receiver<Msg>,
@@ -315,6 +331,9 @@ impl App {
             sprite("game_smug", "", "waiting"),
             sprite("game_pouty", "", "poke"),
             sprite("cheer", "cheer_blink", "waiting"),
+            sprite("held", "held_blink", "game_excited"),
+            sprite("held_dizzy", "", "held"),
+            sprite("coffee", "coffee_blink", "idle"),
         ];
 
         std::thread::spawn(chat::preload); // memory.json and the embedding model, off the UI thread
@@ -357,6 +376,12 @@ impl App {
             pose: Pose::Idle,
             start: Instant::now(),
             poke_at: None,
+            held: false,
+            swing: Vec2::ZERO,
+            hold: None,
+            dizzy: 0.0,
+            coffee_until: -99.0,
+            dizzy_until: -99.0,
             blink_at: 2.0,
             rng: seed | 1,
             inbox,
@@ -426,6 +451,11 @@ impl App {
         }
     }
 
+    /// A random line from `lines`.
+    fn pick(&mut self, lines: &'static [&'static str]) -> &'static str {
+        lines[(self.rand01() * lines.len() as f32) as usize % lines.len()]
+    }
+
     fn rand01(&mut self) -> f32 {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 7;
@@ -461,7 +491,7 @@ impl App {
         if on {
             music::play();
             self.music = Some(false);
-            let line = { let l = i18n::lines().music; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+            let line = self.pick(i18n::lines().music);
             self.say(line.into(), None, t - 4.0);
         } else {
             music::stop();
@@ -707,6 +737,12 @@ impl App {
                 (self.picking, self.tour) = (true, None);
                 close = true;
             }
+            if ui.button(text.give_coffee).clicked() {
+                self.coffee_until = t + COFFEE_FOR;
+                let line = self.pick(i18n::lines().coffee);
+                self.say(line.into(), None, t - 6.0);
+                close = true;
+            }
             if ui.button(text.what_can_i_do).clicked() {
                 self.tour = Some((t, usize::MAX));
                 close = true;
@@ -824,7 +860,7 @@ impl App {
         let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
         std::thread::spawn(move || {
             let partial = |short: &str| {
-                let _ = tx.send(Msg::Partial { chat: true, short: short.to_string() });
+                let _ = tx.send(Msg::Partial { reply: None, short: short.to_string() });
                 wake.request_repaint();
             };
             let answer = chat::reply(&msg, &work, partial);
@@ -839,9 +875,10 @@ impl App {
             self.tour = None;
         }
         let (path, ev) = match msg {
-            Msg::Rewritten { short, long } => {
-                // A rewrite that arrives after the timeout already showed the plain reply: drop it.
-                if self.pending_reply.take().is_some() {
+            Msg::Rewritten { short, long, at } => {
+                // Only the rewrite of the reply still waiting: not one that timed out, or an older reply's slow one.
+                if self.pending_reply.as_ref().is_some_and(|p| p.1 == at) {
+                    self.pending_reply = None;
                     self.settle(t);
                     voice::say_live(&short, false); // when her voice is charged
                     self.say(short, long, t);
@@ -860,8 +897,12 @@ impl App {
                 }
                 return;
             }
-            Msg::Partial { chat, short } => {
-                if (chat && self.chat_pending) || (!chat && self.pending_reply.is_some()) {
+            Msg::Partial { reply, short } => {
+                let wanted = match reply {
+                    None => self.chat_pending,
+                    Some(at) => self.pending_reply.as_ref().is_some_and(|p| p.1 == at),
+                };
+                if wanted {
                     self.say(short, None, t);
                 }
                 return;
@@ -895,7 +936,7 @@ impl App {
                     self.minis.retain(|m| m.done_at.is_some());
                     if self.pending_reply.is_none() && self.pose != Pose::Waiting {
                         (self.pose, self.finished_at) = (Pose::Idle, t);
-                        let line = { let l = i18n::lines().bye; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+                        let line = self.pick(i18n::lines().bye);
                         self.say(line.into(), None, t - 4.0);
                     }
                 }
@@ -903,7 +944,7 @@ impl App {
                     let fresh = self.pose != Pose::Waiting; // the later Notification backup doesn't call out again
                     self.pose = Pose::Waiting;
                     self.waiting_since = t;
-                    self.waiting_line = { let l = i18n::lines().waiting; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+                    self.waiting_line = self.pick(i18n::lines().waiting);
                     if fresh {
                         voice::say(self.waiting_line, voice::Mode::Attention); // out loud, always: Claude needs you
                     }
@@ -969,11 +1010,11 @@ impl App {
                 let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
                 std::thread::spawn(move || {
                     let partial = |short: &str| {
-                        let _ = tx.send(Msg::Partial { chat: false, short: short.to_string() });
+                        let _ = tx.send(Msg::Partial { reply: Some(t), short: short.to_string() });
                         wake.request_repaint();
                     };
                     let (short, long) = rewrite::rewrite(&text, partial).unwrap_or_else(|| (log::clean(&text, 160), None));
-                    let _ = tx.send(Msg::Rewritten { short, long });
+                    let _ = tx.send(Msg::Rewritten { short, long, at: t });
                     wake.request_repaint();
                 });
             }
@@ -1050,7 +1091,7 @@ impl eframe::App for App {
         let cheering = matches!(self.pose, Pose::Idle | Pose::Working) && (t - self.typed_at < TYPING_SHOWS || t < self.cheer_until);
         if cheering && t - self.cheer_said > CHEER_LINE_EVERY && !self.playing() && self.tour.is_none() {
             self.cheer_said = t;
-            let line = { let l = i18n::lines().cheer; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+            let line = self.pick(i18n::lines().cheer);
             self.say(line.into(), None, t - 4.0);
         }
         // Working with nothing to say (Claude thinking, rewrite not back yet): a general line that expires after
@@ -1119,6 +1160,9 @@ impl eframe::App for App {
                 self.tour = None;
             }
         }
+        if t < self.coffee_until {
+            pose = Pose::Coffee; // whatever she was doing, she stops for a sip
+        }
         if t > self.blink_at + 0.13 {
             self.blink_at = t + 3.0 + 3.0 * self.rand01();
         }
@@ -1134,10 +1178,10 @@ impl eframe::App for App {
             self.music = Some(true);
         }
         // Idle with nothing on screen for a while: sparkle and offer to help. Not while music plays: that's chill time.
-        if self.pose != Pose::Idle || cheering || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.playing() {
+        if self.pose != Pose::Idle || cheering || t < self.coffee_until || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.playing() {
             self.nudge_at = t + IDLE_NUDGE;
         } else if t > self.nudge_at {
-            let line = { let l = i18n::lines().idle; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+            let line = self.pick(i18n::lines().idle);
             self.say(line.into(), None, t - 3.0);
             self.sparkle_at = t;
         }
@@ -1154,8 +1198,8 @@ impl eframe::App for App {
                 .or_else(|| ctx.input(|i| i.viewport().monitor_size).map(|m| Rect::from_min_size(Pos2::ZERO, m)));
             if let (Some(outer), Some(work)) = (ctx.input(|i| i.viewport().outer_rect), work) {
                 // First run off Windows (no saved spot, no taskbar corner at launch): bottom-right, clear of a dock or panel.
-                let start = if self.first_run && !cfg!(windows) { pos2(work.right() - size.x - 10.0, work.bottom() - size.y - 70.0) } else { outer.min };
-                let x = start.x.min(work.right() - size.x).max(work.left());
+                let start = if self.first_run && !cfg!(windows) { pos2(work.right() - size.x + swing_room() - 10.0, work.bottom() - size.y - 70.0) } else { outer.min };
+                let x = start.x.min(work.right() - size.x + swing_room()).max(work.left() - swing_room());
                 let y = start.y.min(work.bottom() - size.y).max(work.top());
                 if (x, y) != (outer.min.x, outer.min.y) {
                     ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(x, y)));
@@ -1190,13 +1234,52 @@ impl eframe::App for App {
         }
 
         let resp = ui.interact(body, ui.scope_id().with("her"), Sense::click_and_drag());
+        // While held, we move the window ourselves so her hold point stays on the cursor, and swing her from
+        // the cursor's movement. Where the OS cursor can't be read (Wayland), the OS drags her instead, without swinging.
+        let cursor = os::cursor(native_ppp).map(|(x, y)| pos2(x, y) / ctx.pixels_per_point());
         if resp.drag_started() {
-            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+            self.held = true;
+            self.swing = Vec2::ZERO;
+            self.hold = cursor.map(|c| (c, 0.0, t));
+            if self.hold.is_none() {
+                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+            }
+        } else if self.held && !os::mouse_down().unwrap_or_else(|| ctx.input(|i| i.pointer.any_down())) {
+            self.held = false;
+            self.hold = None;
+            self.swing = Vec2::ZERO;
+        }
+        if let (Some((last, last_vx, last_t)), Some(c), Some(inner)) = (self.hold, cursor, ctx.input(|i| i.viewport().inner_rect)) {
+            let dt = (t - last_t).clamp(0.001, 0.05);
+            let vx = (c.x - last.x) / dt;
+            self.swing = anim::swing_step(self.swing, (vx - last_vx) / HEIGHT, dt);
+            self.hold = Some((c, vx, t));
+            self.dizzy = (self.dizzy + (c - last).length() / HEIGHT - DIZZY_WEARS_OFF * dt).max(0.0);
+            if self.dizzy > DIZZY_AT {
+                self.dizzy = 0.0;
+                if t > self.dizzy_until {
+                    let line = self.pick(i18n::lines().dizzy);
+                    self.say(line.into(), None, t - 6.0);
+                }
+                self.dizzy_until = t + DIZZY_FOR; // more shaking keeps her dizzy
+            }
+            let hold_point = pos2(body.left() + body.width() * anim::COLLAR.0, body.top() + body.height() * anim::COLLAR.1);
+            let shift = (c - inner.min.to_vec2()) - hold_point;
+            if shift.length() > 0.5 {
+                let outer = ctx.input(|i| i.viewport().outer_rect).unwrap_or(inner);
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min + shift));
+            }
+        }
+        if self.held {
+            pose = if t < self.dizzy_until { Pose::Dizzy } else { Pose::Held };
+            ctx.request_repaint();
+        } else {
+            self.dizzy = 0.0;
         }
         if resp.clicked() {
             self.poke_at = Some(t);
             if self.bubble.as_ref().is_none_or(|b| b.is_label) {
-                let line = { let l = i18n::lines().poke; l[(self.rand01() * l.len() as f32) as usize % l.len()] };
+                let line = self.pick(i18n::lines().poke);
                 self.say(line.into(), None, t - 6.0);
             }
         }
@@ -1216,7 +1299,43 @@ impl eframe::App for App {
         let painter = ui.painter();
         let sprite = &self.sprites[pose as usize];
         let tex = if blinking { sprite.blink.as_ref().unwrap_or(&sprite.open) } else { &sprite.open };
-        draw_sprite(painter, tex, feet, HEIGHT, t, pose, poke_t.unwrap_or(9.0));
+        draw_sprite(painter, tex, feet, HEIGHT, t, pose, poke_t.unwrap_or(9.0), self.swing);
+        if pose == Pose::Coffee {
+            // Steam curls up from the mug's rim (coffee.png has none painted), following her head tilt.
+            let rim = feet + anim::warp(0.535, 0.286, t, pose, 9.0, aspect, Vec2::ZERO) * HEIGHT;
+            for (i, phase) in [0.0, 2.6].into_iter().enumerate() {
+                let base = rim + vec2(i as f32 * 5.0, 0.0);
+                let pulse = 0.6 + 0.4 * (t * 1.3 + phase).sin();
+                let at = |f: f32| base + vec2((f * 5.0 - t * 3.0 + phase).sin() * 4.0 * f + f * 7.0, -f * 30.0);
+                for k in 0..12 {
+                    let (f0, f1) = (k as f32 / 12.0, (k + 1) as f32 / 12.0);
+                    let alpha = pulse * (f0 * 4.0).min(1.0) * (1.0 - f0) * 0.7;
+                    painter.line_segment([at(f0), at(f1)], Stroke::new(3.0 - 1.5 * f0, Color32::WHITE.gamma_multiply(alpha)));
+                }
+            }
+        }
+        if t < self.coffee_until {
+            // Hearts float up around her, each on its own loop, and fade out as the coffee runs out.
+            let fade = ((self.coffee_until - t) / 0.8).min(1.0);
+            for (i, fx) in [0.10, 0.88, 0.22, 0.78, 0.5].into_iter().enumerate() {
+                let p = (t / 2.2 + i as f32 * 0.37).fract();
+                let x = body.left() + body.width() * fx + (p * 6.0 + i as f32).sin() * 6.0;
+                let y = body.top() + body.height() * (0.55 - 0.5 * p);
+                heart(painter, pos2(x, y), 5.0 + 3.0 * (i % 2) as f32, fade * (1.0 - p) * (p * 6.0).min(1.0));
+            }
+            ctx.request_repaint();
+        }
+        if t < self.dizzy_until || pose == Pose::Dizzy {
+            // Stars circle her head, following her swing; the near side of the loop is bigger.
+            let top = if matches!(pose, Pose::Held | Pose::Dizzy) { (0.40, 0.07) } else { (0.5, 0.06) };
+            let head = feet + anim::warp(top.0, top.1, t, pose, 9.0, aspect, self.swing) * HEIGHT;
+            let fade = if pose == Pose::Dizzy { 1.0 } else { ((self.dizzy_until - t) / 0.5).min(1.0) }; // the tour shows her dizzy
+            for i in 0..3 {
+                let a = t * 4.0 + i as f32 * std::f32::consts::TAU / 3.0;
+                sparkle(painter, head + vec2(a.cos() * 42.0, a.sin() * 9.0), 6.0 + 2.5 * a.sin(), fade);
+            }
+            ctx.request_repaint();
+        }
         if pose == Pose::Waiting {
             let bob = (t * 6.0).sin().abs() * 6.0;
             let at = pos2(body.right() - 38.0, body.top() + 30.0 - bob);
@@ -1267,7 +1386,7 @@ impl eframe::App for App {
             let mfeet = feet + vec2(side * dist, 0.0);
             let (mpose, text) = if m.done_at.is_some() { (Pose::Waiting, text.done) } else { (Pose::Working, m.label.as_str()) };
             let mt = t + i as f32 * 0.7; // out of step with each other
-            draw_sprite(painter, &self.sprites[mpose as usize].open, mfeet, HEIGHT * MINI, mt, mpose, 9.0);
+            draw_sprite(painter, &self.sprites[mpose as usize].open, mfeet, HEIGHT * MINI, mt, mpose, 9.0, Vec2::ZERO);
             draw_box(painter, text, FontId::proportional(10.0), INK, 90.0, mfeet - vec2(0.0, HEIGHT * MINI + 2.0), false);
         }
 
@@ -1607,6 +1726,14 @@ fn mmss(secs: f32) -> String {
 }
 
 /// An eighth note: a tilted head, a stem and a flag.
+/// A pink heart of half-width `r` centred at `c`: two circles over a point.
+fn heart(painter: &Painter, c: Pos2, r: f32, alpha: f32) {
+    let pink = Color32::from_rgb(0xFF, 0x6F, 0x91).gamma_multiply(alpha);
+    painter.circle_filled(c + vec2(-r * 0.5, -r * 0.2), r * 0.55, pink);
+    painter.circle_filled(c + vec2(r * 0.5, -r * 0.2), r * 0.55, pink);
+    painter.add(egui::Shape::convex_polygon(vec![c + vec2(-r * 1.02, 0.0), c + vec2(r * 1.02, 0.0), c + vec2(0.0, r * 1.1)], pink, Stroke::NONE));
+}
+
 fn music_note(painter: &Painter, at: Pos2, alpha: f32) {
     let c = CORAL.gamma_multiply(alpha);
     painter.add(egui::Shape::ellipse_filled(at, vec2(4.5, 3.5), c));
@@ -1660,7 +1787,14 @@ fn platform_event_loop() -> Option<eframe::EventLoopBuilderHook> {
 
 /// Window size in points; egui zoom turns it into her on-screen size.
 fn window_size() -> Vec2 {
-    vec2(WIDTH, HEIGHT + 2.0 * MARGIN + BUBBLE_ROOM)
+    vec2(WIDTH + 2.0 * swing_room(), HEIGHT + 2.0 * MARGIN + BUBBLE_ROOM)
+}
+
+/// Room for her swing on each side of her window. It may hang off the screen edge, since it's see-through.
+/// Always there, because resizing the window when you pick her up shows a frame of her in the wrong place.
+/// None where clicks can't pass through (Wayland): it would block the desktop, and she doesn't swing there.
+fn swing_room() -> f32 {
+    if os::click_through() { SWING_ROOM } else { 0.0 }
 }
 
 fn main() -> eframe::Result {
@@ -1692,7 +1826,7 @@ fn main() -> eframe::Result {
         .with_title("Claudesona");
     // First run: bottom-right above the taskbar. Later runs: eframe restores where you left her.
     if let Some((right, bottom)) = os::work_area_corner() {
-        viewport = viewport.with_position(pos2(right - size.x - 10.0, bottom - size.y));
+        viewport = viewport.with_position(pos2(right - size.x + swing_room() - 10.0, bottom - size.y));
     }
     let opts = eframe::NativeOptions {
         viewport,
