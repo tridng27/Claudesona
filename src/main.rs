@@ -10,6 +10,8 @@ mod i18n;
 mod log;
 mod music;
 mod rewrite;
+mod session;
+mod stream;
 mod voice;
 #[cfg_attr(windows, path = "os_windows.rs")]
 #[cfg_attr(not(windows), path = "os_unix.rs")]
