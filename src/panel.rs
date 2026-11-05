@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 const PANEL_W: f32 = 400.0;
 const PANEL_H: f32 = 540.0;
-const SHOW_MAX: usize = 8000; // characters of a diff or file drawn in an expanded row
+const SHOW_MAX: usize = 30_000; // characters drawn in an expanded row (a diff plus up to 20k of output)
 const RED: Color32 = Color32::from_rgb(0xB0, 0x3A, 0x2E);
 const GREEN: Color32 = Color32::from_rgb(0x3E, 0x7D, 0x3A);
 
@@ -31,7 +31,8 @@ pub struct Step {
     pub done: bool,
     pub is_error: bool,
     pub refused: bool,
-    pub output: String, // the tool result, short (stream.rs keeps 80 characters)
+    pub output: String, // the whole tool result (stream.rs caps it at 20k characters)
+    pub parent: Option<String>, // the helper (Agent step) this step ran inside
 }
 
 #[derive(Default, Debug)]
@@ -77,20 +78,17 @@ impl Timeline {
                 let turn = self.open();
                 (turn.reply, turn.live) = (t.clone(), String::new());
             }
-            Event::Tool { id, name, input, label, work } => self.open().steps.push(Step {
-                id: id.clone(),
-                name: name.clone(),
-                input: input.clone(),
-                work: *work,
-                running: label.clone(),
-                done: false,
-                is_error: false,
-                refused: false,
-                output: String::new(),
-            }),
-            Event::ToolDone { id, is_error, refused, summary } => {
+            Event::Tool { id, name, input, label, work, parent } => {
+                let step = Step { id: id.clone(), name: name.clone(), input: input.clone(), work: *work, running: label.clone(), done: false, is_error: false, refused: false, output: String::new(), parent: parent.clone() };
+                // A helper's step goes to its helper's turn: a background helper outlives the turn it started in.
+                match parent.as_deref().and_then(|p| self.turns.iter().rposition(|t| t.steps.iter().any(|s| s.id == p))) {
+                    Some(i) => self.turns[i].steps.push(step),
+                    None => self.open().steps.push(step),
+                }
+            }
+            Event::ToolDone { id, is_error, refused, output, .. } => {
                 if let Some(s) = self.step(id) {
-                    (s.done, s.is_error, s.refused, s.output) = (true, *is_error, *refused, summary.clone());
+                    (s.done, s.is_error, s.refused, s.output) = (true, *is_error, *refused, output.clone());
                 }
                 self.pending.retain(|p| p.tool_use_id != *id);
             }
@@ -356,7 +354,7 @@ fn session_ui(ui: &mut egui::Ui, s: &mut PanelState, tl: &Timeline) -> Option<Pa
         egui::Frame::new().fill(Color32::WHITE).stroke(Stroke::new(1.5, CORAL)).corner_radius(8).inner_margin(8).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(text.asks.replace("{tool}", &p.tool)).strong());
-            let step = Step { id: p.tool_use_id.clone(), name: p.tool.clone(), input: p.input.clone(), work: crate::log::work_kind(&p.tool, &p.input), running: String::new(), done: true, is_error: false, refused: false, output: String::new() };
+            let step = Step { id: p.tool_use_id.clone(), name: p.tool.clone(), input: p.input.clone(), work: crate::log::work_kind(&p.tool, &p.input), running: String::new(), done: true, is_error: false, refused: false, output: String::new(), parent: None };
             egui::ScrollArea::vertical().id_salt("permission").max_height(140.0).show(ui, |ui| ui.add(egui::Label::new(details(&step)).selectable(true)));
             ui.horizontal(|ui| {
                 if ui.button(text.allow).clicked() {
@@ -387,21 +385,11 @@ fn session_ui(ui: &mut egui::Ui, s: &mut PanelState, tl: &Timeline) -> Option<Pa
                 if let Some(sum) = &turn.summary {
                     ui.label(RichText::new(sum).italics().color(CORAL));
                 }
-                for step in &turn.steps {
-                    let open = s.open_rows.contains(&step.id);
-                    let colour = if step.is_error && !step.refused { RED } else if step.done { INK } else { SOFT_INK };
-                    if ui.selectable_label(open, RichText::new(format!("{} {}", icon(step), label(step))).color(colour)).clicked() {
-                        if open {
-                            s.open_rows.remove(&step.id);
-                        } else {
-                            s.open_rows.insert(step.id.clone());
-                        }
-                    }
-                    if open {
-                        egui::Frame::new().fill(Color32::WHITE).corner_radius(4).inner_margin(6).show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            egui::ScrollArea::vertical().id_salt(&step.id).max_height(220.0).show(ui, |ui| ui.add(egui::Label::new(details(step)).selectable(true)));
-                        });
+                for step in turn.steps.iter().filter(|x| x.parent.is_none()) {
+                    row(ui, &mut s.open_rows, step);
+                    let kids: Vec<&Step> = turn.steps.iter().filter(|x| x.parent.as_ref() == Some(&step.id)).collect();
+                    if !kids.is_empty() {
+                        ui.indent(&step.id, |ui| kids.into_iter().for_each(|k| row(ui, &mut s.open_rows, k)));
                     }
                 }
                 if !turn.done && !turn.live.is_empty() {
@@ -426,16 +414,35 @@ fn session_ui(ui: &mut egui::Ui, s: &mut PanelState, tl: &Timeline) -> Option<Pa
     action
 }
 
+/// A step's row; a click opens its details (diff, command, output) in a scrollable monospace box.
+fn row(ui: &mut egui::Ui, open_rows: &mut HashSet<String>, step: &Step) {
+    let open = open_rows.contains(&step.id);
+    let colour = if step.is_error && !step.refused { RED } else if step.done { INK } else { SOFT_INK };
+    if ui.selectable_label(open, RichText::new(format!("{} {}", icon(step), label(step))).color(colour)).clicked() {
+        if open {
+            open_rows.remove(&step.id);
+        } else {
+            open_rows.insert(step.id.clone());
+        }
+    }
+    if open {
+        egui::Frame::new().fill(Color32::WHITE).corner_radius(4).inner_margin(6).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical().id_salt(&step.id).max_height(220.0).show(ui, |ui| ui.add(egui::Label::new(details(step)).selectable(true)));
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::parse_line;
+    use crate::stream::{parse_line, parse_line_all};
     use serde_json::json;
 
     fn timeline(fixture: &str) -> Timeline {
         let mut tl = Timeline::default();
         tl.user_prompt("do it", Some("uh do it"));
-        for ev in fixture.lines().flat_map(parse_line) {
+        for ev in fixture.lines().flat_map(parse_line_all) {
             tl.push(&ev);
         }
         tl
@@ -492,6 +499,7 @@ mod tests {
         let mut tl = timeline(include_str!("../tests/fixtures/stream/permission.jsonl"));
         tl.pending.push(Permission { request_id: "r".into(), tool: "Edit".into(), input: json!({"file_path": "a.rs", "old_string": "a", "new_string": "b"}), tool_use_id: "x".into() });
         tl.set_summary(0, "Made a.txt~");
+        include_str!("../tests/fixtures/stream/agent_turn.jsonl").lines().flat_map(parse_line_all).for_each(|ev| tl.push(&ev)); // nested rows
         let ctx = egui::Context::default();
         let mut s = PanelState::new(Rect::from_min_size(pos2(800.0, 400.0), vec2(200.0, 250.0)), Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0)));
         s.open_rows.extend(tl.turns.iter().flat_map(|t| t.steps.iter().map(|x| x.id.clone())));
@@ -509,6 +517,32 @@ mod tests {
     }
 
     #[test]
+    fn helper_steps_nest_under_the_helper() {
+        let mut tl = Timeline::default();
+        tl.user_prompt("count", None);
+        for ev in include_str!("../tests/fixtures/stream/agent_turn.jsonl").lines().flat_map(parse_line_all) {
+            tl.push(&ev);
+        }
+        let steps = &tl.turns[0].steps;
+        let helper = steps.iter().find(|s| s.name == "Agent").unwrap();
+        let kids: Vec<&Step> = steps.iter().filter(|s| s.parent.as_ref() == Some(&helper.id)).collect();
+        assert_eq!(kids[0].name, "Read");
+        assert!(kids.iter().all(|k| k.done) && kids.iter().any(|k| k.is_error));
+        assert!(kids[0].output.contains("pineapple"));
+
+        // A background helper's steps land in the turn that started it, not the one its end wakes up.
+        let mut tl = Timeline::default();
+        for ev in include_str!("../tests/fixtures/stream/background_agent.jsonl").lines().flat_map(parse_line_all) {
+            tl.push(&ev);
+        }
+        assert_eq!(tl.turns.len(), 2);
+        let bg = "toolu_01HorGwA2eyiHjzJ21tKGYCb".to_string();
+        tl.push(&Event::Tool { id: "k".into(), name: "Read".into(), input: json!({}), label: String::new(), work: Work::Reading, parent: Some(bg.clone()) });
+        assert!(tl.turns[0].steps.iter().any(|s| s.id == "k" && s.parent == Some(bg.clone())));
+        assert_eq!(tl.turns.len(), 2);
+    }
+
+    #[test]
     fn interrupted_turn() {
         let tl = timeline(include_str!("../tests/fixtures/stream/interrupt.jsonl"));
         assert!(tl.turns[0].interrupted && tl.turns.iter().all(|t| t.done));
@@ -521,7 +555,7 @@ mod tests {
         assert_eq!(changes("Edit", &json!({"old_string": "x", "new_string": "x\ny"})), (1, 0));
         assert_eq!(changes("MultiEdit", &json!({"edits": [edit, {"old_string": "q", "new_string": ""}]})), (2, 3));
         assert_eq!(changes("Write", &json!({"content": "1\n2\n3\n"})), (3, 0));
-        let step = Step { id: "1".into(), name: "Edit".into(), input: json!({"file_path": "C:\\src\\app.rs", "old_string": "a", "new_string": "b\nc"}), work: Work::Editing, running: String::new(), done: true, is_error: false, refused: false, output: String::new() };
+        let step = Step { id: "1".into(), name: "Edit".into(), input: json!({"file_path": "C:\\src\\app.rs", "old_string": "a", "new_string": "b\nc"}), work: Work::Editing, running: String::new(), done: true, is_error: false, refused: false, output: String::new(), parent: None };
         assert_eq!(label(&step), "Edited app.rs (+2 −1)");
         let tests = Step { name: "Bash".into(), input: json!({"command": "cargo test"}), work: Work::Testing, is_error: true, ..step };
         assert_eq!(label(&tests), "Ran tests: failed");

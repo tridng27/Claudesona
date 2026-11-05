@@ -10,9 +10,11 @@ pub enum Event {
     Init { session_id: String, model: String, tools: Vec<String>, mcp_servers: Vec<(String, String)>, slash_commands: Vec<String> },
     TextDelta(String), // a piece of Claude's text as it streams
     Text(String),      // a whole text block: a side note or the reply (Result carries the reply)
-    Tool { id: String, name: String, input: Value, label: String, work: Work },
+    /// `parent`: the Agent call this step runs inside (a helper's own step), from `parse_line_all` only.
+    Tool { id: String, name: String, input: Value, label: String, work: Work, parent: Option<String> },
     AgentStart { id: String, label: String }, // an Agent call (a mini); ends with AgentDone
-    ToolDone { id: String, is_error: bool, refused: bool, summary: String },
+    /// `summary` is one short line for labels; `output` the whole result (up to OUTPUT_MAX characters).
+    ToolDone { id: String, is_error: bool, refused: bool, summary: String, output: String, parent: Option<String> },
     AgentDone(String), // a background agent ended (its ToolDone only said it launched)
     /// Claude asks whether it may run a tool (`--permission-prompt-tool stdio`); answer with Session::allow/deny.
     Permission { request_id: String, tool: String, input: Value, tool_use_id: String },
@@ -23,12 +25,23 @@ pub enum Event {
     Exit, // the process ended (sent by Session, not parsed)
 }
 
+const OUTPUT_MAX: usize = 20_000; // characters of a tool result kept for the panel
+
+/// Top-level events only: a helper's own steps don't drive her (the mini shows the helper as a whole).
 pub fn parse_line(line: &str) -> Vec<Event> {
+    parse_line_all(line).into_iter().filter(|e| !matches!(e, Event::Tool { parent: Some(_), .. } | Event::ToolDone { parent: Some(_), .. })).collect()
+}
+
+/// Like `parse_line`, plus a helper's own steps as Tool / ToolDone with `parent` set to the helper's Agent call.
+pub fn parse_line_all(line: &str) -> Vec<Event> {
     let Ok(d) = serde_json::from_str::<Value>(line) else { return vec![] };
-    // A subagent's own steps: v1 ignores sidechains too; the mini shows the agent as a whole.
-    if !d["parent_tool_use_id"].is_null() {
-        return vec![];
-    }
+    let Some(parent) = d["parent_tool_use_id"].as_str() else { return parse(&d, None) };
+    // Only the steps: a helper's text, prompt and streamed pieces belong to the helper, not the turn.
+    parse(&d, Some(parent)).into_iter().filter(|e| matches!(e, Event::Tool { .. } | Event::ToolDone { .. })).collect()
+}
+
+fn parse(d: &Value, parent: Option<&str>) -> Vec<Event> {
+    let parent = parent.map(str::to_string);
     let s = |v: &Value| v.as_str().unwrap_or("").to_string();
     match (d["type"].as_str().unwrap_or(""), d["subtype"].as_str().unwrap_or("")) {
         ("system", "init") => {
@@ -54,7 +67,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                     if matches!(name.as_str(), "Agent" | "Task") {
                         v.push(Event::AgentStart { id: id.clone(), label: clean(input["description"].as_str().unwrap_or("helper"), 18) });
                     }
-                    v.insert(0, Event::Tool { label: tool_label(&name, &input), work: work_kind(&name, &input), id, name, input });
+                    v.insert(0, Event::Tool { label: tool_label(&name, &input), work: work_kind(&name, &input), id, name, input, parent: parent.clone() });
                     v
                 }
                 _ => vec![],
@@ -73,7 +86,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                     let c = &b["content"];
                     let text = c.as_str().map(str::to_string).unwrap_or_else(|| blocks(c).map(|x| s(&x["text"])).collect::<Vec<_>>().join("\n"));
                     let refused = rejected(&id) || text.starts_with("[Request interrupted by user");
-                    Event::ToolDone { is_error: b["is_error"] == true, refused, summary: clean(&text, 80), id }
+                    Event::ToolDone { is_error: b["is_error"] == true, refused, summary: clean(&text, 80), output: text.chars().take(OUTPUT_MAX).collect(), id, parent: parent.clone() }
                 })
                 .collect()
         }
@@ -139,7 +152,7 @@ mod tests {
         let rest = &main(include_str!("../tests/fixtures/stream/tool_turn.jsonl"))[1..];
         let Event::Tool { id, name, label, work, .. } = &rest[0] else { panic!("{:?}", rest[0]) };
         assert_eq!((id.as_str(), name.as_str(), label.as_str(), *work), ("toolu_0122cAmzecV68T56UGcQayWm", "Read", "Reading notes.txt…", Work::Reading));
-        assert_eq!(rest[1], Event::ToolDone { id: id.clone(), is_error: false, refused: false, summary: "1 The secret word is pineapple. 2".into() });
+        assert_eq!(rest[1], Event::ToolDone { id: id.clone(), is_error: false, refused: false, summary: "1 The secret word is pineapple. 2".into(), output: "1\tThe secret word is pineapple.\n2\t".into(), parent: None });
         assert_eq!(rest[2], Event::Text("The secret word is **pineapple**, according to notes.txt.".into()));
         assert_eq!(rest[3], Event::Result { text: "The secret word is **pineapple**, according to notes.txt.".into(), is_error: false, interrupted: false });
         assert_eq!(rest.len(), 4);
@@ -157,6 +170,37 @@ mod tests {
         assert!(matches!(&ev[4], Event::ToolDone { id: i, is_error: false, .. } if *i == id));
         assert!(matches!(&ev[6], Event::Result { text, .. } if text == "The subagent counted one line in notes.txt."));
         assert_eq!(ev.len(), 7);
+    }
+
+    #[test]
+    fn helper_steps_carry_their_parent() {
+        let fixture = include_str!("../tests/fixtures/stream/agent_turn.jsonl");
+        let id = "toolu_01Ad698NtDw1W5E5FQSXBmPx";
+        let all: Vec<Event> = fixture.lines().flat_map(parse_line_all).filter(|e| !matches!(e, Event::TextDelta(_))).collect();
+        let kids: Vec<_> = all.iter().filter_map(|e| match e {
+            Event::Tool { name, parent: Some(p), .. } => Some((p.as_str(), name.as_str(), false)),
+            Event::ToolDone { parent: Some(p), is_error, .. } => Some((p.as_str(), "done", *is_error)),
+            _ => None,
+        }).collect();
+        assert_eq!(kids[0], (id, "Read", false));
+        assert_eq!(kids[1], (id, "done", false));
+        assert_eq!(kids.iter().filter(|k| k.1 != "done").count(), kids.iter().filter(|k| k.1 == "done").count());
+        assert!(kids.contains(&(id, "done", true))); // its refused PowerShell
+        // Nothing else of the helper's leaks through, and top-level events are the same as parse_line's.
+        let top: Vec<&Event> = all.iter().filter(|e| !matches!(e, Event::Tool { parent: Some(_), .. } | Event::ToolDone { parent: Some(_), .. })).collect();
+        assert_eq!(top, main(fixture).iter().collect::<Vec<_>>());
+
+        let fixture = include_str!("../tests/fixtures/stream/background_agent.jsonl");
+        // This helper only wrote text: none of it shows up, so both parsers agree.
+        assert_eq!(fixture.lines().flat_map(parse_line_all).collect::<Vec<_>>(), events(fixture));
+    }
+
+    #[test]
+    fn keeps_the_whole_output() {
+        let long = "x".repeat(30_000);
+        let line = json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":long}]}}).to_string();
+        let Event::ToolDone { summary, output, .. } = &parse_line(&line)[0] else { panic!() };
+        assert_eq!((summary.chars().count() <= 81, output.len()), (true, OUTPUT_MAX));
     }
 
     #[test]

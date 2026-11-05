@@ -414,11 +414,21 @@ fn folder_name(path: &str) -> &str {
     path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+/// A folder path in one spelling: `C:/x`, `C:\x\` and (on Windows and macOS, whose disks ignore case) `c:\X` match.
+fn same_folder(a: &str, b: &str) -> bool {
+    let norm = |p: &str| {
+        let p = p.replace('\\', "/");
+        let p = p.trim_end_matches('/');
+        if cfg!(any(windows, target_os = "macos")) { p.to_lowercase() } else { p.to_string() }
+    };
+    !a.is_empty() && norm(a) == norm(b)
+}
+
 /// The project node for a folder: the one sessions ran in there, else a project fact naming the folder.
 fn find_project(m: &Memory, path: &str) -> Option<usize> {
     let name = folder_name(path).to_lowercase();
     let by_name = |n: &Node| n.kind == "project" && n.path.is_empty() && !name.is_empty() && n.text.to_lowercase().contains(&name);
-    m.nodes.iter().position(|n| n.kind == "project" && n.path == path).or_else(|| m.nodes.iter().position(by_name))
+    m.nodes.iter().position(|n| n.kind == "project" && same_folder(&n.path, path)).or_else(|| m.nodes.iter().position(by_name))
 }
 
 /// Stores `summary` as the project's newest session; sessions past SESSIONS_KEPT fold into the project's text.
@@ -546,6 +556,17 @@ mod tests {
 
     fn has_id(m: &Memory, id: u64) -> bool {
         m.nodes.iter().any(|n| n.id == id)
+    }
+
+    #[test]
+    fn one_folder_however_it_is_spelled() {
+        assert!(same_folder("C:/x", "C:\\x\\") && same_folder("/home/tri/blog/", "/home/tri/blog"));
+        assert!(!same_folder("C:\\x", "C:\\xy") && !same_folder("", ""));
+        assert_eq!(same_folder("C:\\Code\\Blog", "c:/code/blog"), cfg!(any(windows, target_os = "macos")));
+        let mut m = Memory { next: 1, ..Default::default() };
+        add_session(&mut m, "C:/code/blog", "one");
+        add_session(&mut m, "C:\\code\\blog\\", "two");
+        assert_eq!(m.nodes.iter().filter(|n| n.kind == "project").count(), 1);
     }
 
     #[test]
