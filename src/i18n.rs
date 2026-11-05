@@ -89,6 +89,8 @@ pub struct Ui {
     pub save_key: &'static str,
     pub key_saved: &'static str,
     pub forget_key: &'static str,
+    pub graph_empty: &'static str,
+    pub graph_links: &'static str,
 }
 
 const EN_UI: Ui = Ui {
@@ -148,6 +150,8 @@ const EN_UI: Ui = Ui {
     save_key: "Save key",
     key_saved: "ElevenLabs key saved ✓",
     forget_key: "Remove key",
+    graph_empty: "No memories yet~ Chat with me! (・ω・)",
+    graph_links: "Links",
 };
 
 const VI_UI: Ui = Ui {
@@ -207,6 +211,8 @@ const VI_UI: Ui = Ui {
     save_key: "Lưu key",
     key_saved: "Đã lưu key ElevenLabs ✓",
     forget_key: "Xoá key",
+    graph_empty: "Chưa có ký ức nào~ Nói chuyện với tớ nha! (・ω・)",
+    graph_links: "Liên kết",
 };
 
 pub fn ui() -> &'static Ui {
