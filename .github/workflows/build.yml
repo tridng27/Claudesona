@@ -2,8 +2,10 @@ name: build
 
 on:
   push:
+    branches: ['**']  # tags run this through release.yml instead, so they don't build twice
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   build:
