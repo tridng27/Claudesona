@@ -8,6 +8,7 @@ mod game;
 mod sudoku;
 mod i18n;
 mod log;
+mod mcp;
 mod music;
 mod rewrite;
 mod voice;
@@ -71,6 +72,8 @@ enum Msg {
     Chat(Option<(String, Option<String>)>), // her answer to your chat message (None: `claude` failed)
     Partial { reply: Option<f64>, short: String }, // the short answer so far, streaming in (chat: None, or the rewrite of the reply that arrived at that time)
     Hook(serde_json::Value), // from `claudesona hook`, or {"quit":true} from install/uninstall
+    #[allow(dead_code)] // v2: read by the permission bubble
+    Permission { req: serde_json::Value, reply: std::net::TcpStream }, // from `claudesona mcp`; answer with mcp::answer
 }
 
 struct Sprite {
@@ -390,8 +393,13 @@ impl App {
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                 let mut text = String::new();
                 let _ = stream.read_to_string(&mut text);
-                if let Ok(v) = serde_json::from_str(&text) {
-                    let _ = tx.send(Msg::Hook(v));
+                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    // `claudesona mcp` keeps the connection open for the answer.
+                    let msg = match v.get_mut("permission") {
+                        Some(req) => Msg::Permission { req: req.take(), reply: stream },
+                        None => Msg::Hook(v),
+                    };
+                    let _ = tx.send(msg);
                     wake.request_repaint();
                 }
             }
@@ -958,6 +966,7 @@ impl App {
                 self.say(short, long, t);
                 return;
             }
+            Msg::Permission { .. } => return, // v2: answered by the permission bubble
             Msg::Hook(v) => {
                 if v["quit"] == true {
                     self.ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1895,6 +1904,7 @@ fn swing_room() -> f32 {
 fn main() -> eframe::Result {
     match std::env::args().nth(1).as_deref() {
         Some("hook") => return Ok(cli::hook()),
+        Some("mcp") => return Ok(mcp::run()),
         Some("install") => return Ok(cli::report(cli::install())),
         Some("uninstall") => return Ok(cli::report(cli::uninstall())),
         // For the developer: make the bundled voice into assets/voice/ (key from ELEVENLABS_API_KEY), then rebuild.
