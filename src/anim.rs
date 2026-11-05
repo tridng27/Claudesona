@@ -18,6 +18,15 @@ pub enum Pose {
     Held = 9,    // you're dragging her by her sweater collar
     Dizzy = 10,  // held, and shaken around too much
     Coffee = 11, // you gave her coffee from the menu: she sips it, whatever else is going on
+    Done = 12,     // work confirmed finished: a brief smug smirk
+    Oops = 13,     // a tool call failed: she sobs a little
+    Dazed = 14,    // Claude compacted its context: spiral eyes, standing
+    Reading = 15,  // working: Read, Grep, Glob (magnifying glass)
+    Editing = 16,  // working: Edit, Write (hammer)
+    Testing = 17,  // working: running tests (bug net)
+    Shipping = 18, // working: git commit / push (books on her head)
+    Web = 19,      // working: WebSearch, WebFetch (hugging "www")
+    Sleep = 20,    // 10 min with nothing going on: asleep, sitting
 }
 
 /// Where you hold her while dragging: the top of her bunched-up sweater in held.png, as (u, v) on her canvas.
@@ -47,6 +56,16 @@ fn style(pose: Pose) -> Style {
         Pose::Coffee => Style { speed: 0.7, sway: 1.5, head: 2.0, hair: 0.010, breath: 0.012, hop: 0.0, hand: 0.0 },
         Pose::Dizzy => Style { speed: 0.8, sway: 3.5, head: 0.0, hair: 0.005, breath: 0.0, hop: 0.0, hand: 0.0 },
         Pose::Poke => Style { speed: 1.0, sway: 0.0, head: 0.0, hair: 0.010, breath: 0.0, hop: 0.0, hand: 0.0 },
+        Pose::Done => Style { speed: 1.2, sway: 2.0, head: 4.0, hair: 0.014, breath: 0.010, hop: 0.0, hand: 0.0 },
+        Pose::Oops => Style { speed: 0.7, sway: 1.0, head: 1.5, hair: 0.008, breath: 0.014, hop: 0.0, hand: 0.0 },
+        Pose::Dazed => Style { speed: 0.8, sway: 3.5, head: 4.0, hair: 0.012, breath: 0.006, hop: 0.0, hand: 0.0 },
+        Pose::Reading => Style { speed: 1.2, sway: 1.0, head: 1.0, hair: 0.010, breath: 0.008, hop: 0.0, hand: 0.0 },
+        Pose::Editing => Style { speed: 2.2, sway: 0.6, head: 1.5, hair: 0.010, breath: 0.006, hop: 0.010, hand: 0.0 },
+        Pose::Testing => Style { speed: 1.6, sway: 1.5, head: 2.5, hair: 0.012, breath: 0.010, hop: 0.008, hand: 0.0 },
+        Pose::Shipping => Style { speed: 1.0, sway: 1.5, head: 1.0, hair: 0.008, breath: 0.004, hop: 0.0, hand: 0.0 },
+        Pose::Web => Style { speed: 1.0, sway: 2.0, head: 2.5, hair: 0.012, breath: 0.010, hop: 0.0, hand: 0.0 },
+        // Sitting: the hair and head regions assume a standing figure, so only her breathing moves.
+        Pose::Sleep => Style { speed: 0.5, sway: 0.0, head: 0.0, hair: 0.0, breath: 0.012, hop: 0.0, hand: 0.0 },
     }
 }
 
@@ -120,6 +139,16 @@ pub fn warp(u: f32, v: f32, t: f32, pose: Pose, poke_t: f32, aspect: f32, swing:
     p
 }
 
+/// Scale around her feet as she enters a lively pose: a quick crouch, then a small stretch that settles.
+/// `since` = seconds in this pose.
+pub fn squash(pose: Pose, since: f32) -> Vec2 {
+    if !matches!(pose, Pose::Cheer | Pose::Waiting | Pose::Excited | Pose::Done) {
+        return vec2(1.0, 1.0);
+    }
+    let d = -0.12 * (since * 18.0).sin() * (-since * 5.0).exp(); // negative first: crouch
+    vec2(1.0 - 0.5 * d, 1.0 + d)
+}
+
 /// One step of her pendulum while held. `swing` = (angle in degrees, angular speed in rad/s);
 /// `dv` = change in the hold point's sideways speed since the last step, in her heights per second.
 pub fn swing_step(swing: Vec2, dv: f32, dt: f32) -> Vec2 {
@@ -141,6 +170,15 @@ pub fn swing_step(swing: Vec2, dv: f32, dt: f32) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn squash_crouches_then_settles() {
+        assert_eq!(squash(Pose::Cheer, 0.0), vec2(1.0, 1.0));
+        assert!(squash(Pose::Cheer, 0.08).y < 0.95);
+        assert!(squash(Pose::Cheer, 0.25).y > 1.0);
+        assert!((squash(Pose::Cheer, 1.0).y - 1.0).abs() < 0.005);
+        assert_eq!(squash(Pose::Idle, 0.08), vec2(1.0, 1.0));
+    }
 
     #[test]
     fn feet_stay_planted_when_idle() {

@@ -36,6 +36,7 @@ const POPUP_SLIDE: f32 = 28.0; // points the popup slides out from her
 const POPUP_IN: f32 = 0.18; // seconds the popup takes to slide and fade in
 const FILLER_EVERY: f32 = 3.0; // seconds each general working line shows
 const FINISHED_FLASH: f32 = 2.5; // seconds of Waiting pose when work is confirmed finished
+const POSE_FADE: f32 = 0.12; // seconds to crossfade between poses
 const TYPING_SHOWS: f32 = 1.5; // seconds she keeps cheering after your last keystroke
 const CHEER_ON_SEND: f32 = 2.5; // seconds she cheers when your prompt reaches the log
 const CHEER_LINE_EVERY: f32 = 20.0; // at most one cheer line this often
@@ -52,6 +53,9 @@ const SOFT_INK: Color32 = Color32::from_rgb(0x8A, 0x5A, 0x4A);
 const SIZES: [(&str, f32); 3] = [("S", 0.75), ("M", 1.0), ("L", 1.35)]; // egui zoom; eframe saves it with egui's memory
 const IDLE_NUDGE: f32 = 25.0; // quiet seconds before she sparkles and offers help (after any bubble is gone)
 const MUSIC_AFTER: f32 = 300.0; // idle seconds before she puts music on by herself
+const SLEEP_AFTER: f32 = 600.0; // seconds with nothing going on before she dozes off (music keeps playing)
+const OOPS_FOR: f32 = 2.0; // seconds she sobs after a tool call fails
+const DAZED_FOR: f32 = 4.0; // seconds of spiral eyes after Claude compacts its context
 // "What can I do": she shows each phase in its pose while explaining it.
 const TOUR_STEP: f32 = 6.5; // seconds per step
 const WORK_MUSIC_KEY: &str = "work_music"; // eframe storage key for the "While working" choice
@@ -135,6 +139,20 @@ fn asset(name: &str) -> Option<&'static [u8]> {
         "held_dizzy" => include_bytes!("../assets/held_dizzy.png"),
         "coffee" => include_bytes!("../assets/coffee.png"),
         "coffee_blink" => include_bytes!("../assets/coffee_blink.png"),
+        "done" => include_bytes!("../assets/done.png"),
+        "done_blink" => include_bytes!("../assets/done_blink.png"),
+        "oops" => include_bytes!("../assets/oops.png"),
+        "oops_blink" => include_bytes!("../assets/oops_blink.png"),
+        "dizzy" => include_bytes!("../assets/dizzy.png"),
+        "reading" => include_bytes!("../assets/reading.png"),
+        "reading_blink" => include_bytes!("../assets/reading_blink.png"),
+        "editing" => include_bytes!("../assets/editing.png"),
+        "editing_blink" => include_bytes!("../assets/editing_blink.png"),
+        "testing" => include_bytes!("../assets/testing.png"),
+        "testing_blink" => include_bytes!("../assets/testing_blink.png"),
+        "shipping" => include_bytes!("../assets/shipping.png"),
+        "websearch" => include_bytes!("../assets/websearch.png"),
+        "sleep" => include_bytes!("../assets/sleep.png"),
         _ => return None,
     })
 }
@@ -199,15 +217,18 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// Draws a pose image bent by the animation, standing on `feet`.
-fn draw_sprite(painter: &Painter, tex: &TextureHandle, feet: Pos2, height: f32, t: f32, pose: Pose, poke_t: f32, swing: Vec2) {
+/// Draws a pose image bent by the animation, standing on `feet`. `since` = seconds in this pose, for the entry pop.
+#[allow(clippy::too_many_arguments)]
+fn draw_sprite(painter: &Painter, tex: &TextureHandle, feet: Pos2, height: f32, t: f32, pose: Pose, poke_t: f32, swing: Vec2, since: f32, alpha: f32) {
     let mut mesh = Mesh::with_texture(tex.id());
     let (gx, gy) = GRID;
+    let scale = anim::squash(pose, since);
+    let color = Color32::WHITE.gamma_multiply(alpha);
     for j in 0..=gy {
         for i in 0..=gx {
             let (u, v) = (i as f32 / gx as f32, j as f32 / gy as f32);
-            let p = anim::warp(u, v, t, pose, poke_t, tex.aspect_ratio(), swing);
-            mesh.vertices.push(egui::epaint::Vertex { pos: feet + vec2(p.x, p.y) * height, uv: pos2(u, v), color: Color32::WHITE });
+            let p = anim::warp(u, v, t, pose, poke_t, tex.aspect_ratio(), swing) * scale;
+            mesh.vertices.push(egui::epaint::Vertex { pos: feet + p * height, uv: pos2(u, v), color });
         }
     }
     let w = gx as u32 + 1;
@@ -249,6 +270,9 @@ struct App {
     dizzy_until: f32, // seeing stars until then
     hold: Option<(Pos2, f32, f32)>, // while we move the window ourselves: last cursor (screen points), its sideways speed, time
     blink_at: f32,
+    shown: Pose,      // the pose drawn last frame
+    prev_shown: Pose, // the one before it, fading out
+    shown_at: f32,    // when `shown` started
     rng: u64,
     inbox: Receiver<Msg>,
     outbox: Sender<Msg>,
@@ -287,7 +311,11 @@ struct App {
     popup: Option<Popup>,
     chat_pending: bool,
     last_reply: String, // Claude's last reply, plain, so chat knows what just happened
-    finished_at: f32,   // when Claude's work was last confirmed finished: she shows Waiting briefly
+    finished_at: f32,   // when Claude's work was last confirmed finished: she shows Done briefly
+    work: log::Work,    // what the current tool call is doing, for her working pose
+    oops_until: f32,    // a tool call failed: sobbing until then
+    dazed_until: f32,   // Claude compacted its context: spiral eyes until then
+    quiet_since: f32,   // start of the stretch with nothing going on; she sleeps after SLEEP_AFTER
     voice_on: bool,     // remembered
     filler: usize,      // the working line she said last
     last_input: u32,    // OS tick of the last keyboard or mouse input seen
@@ -334,6 +362,15 @@ impl App {
             sprite("held", "held_blink", "game_excited"),
             sprite("held_dizzy", "", "held"),
             sprite("coffee", "coffee_blink", "idle"),
+            sprite("done", "done_blink", "waiting"),
+            sprite("oops", "oops_blink", "idle"),
+            sprite("dizzy", "", "idle"),
+            sprite("reading", "reading_blink", "working"),
+            sprite("editing", "editing_blink", "working"),
+            sprite("testing", "testing_blink", "working"),
+            sprite("shipping", "", "working"),
+            sprite("websearch", "", "working"),
+            sprite("sleep", "", "idle"),
         ];
 
         std::thread::spawn(chat::preload); // memory.json and the embedding model, off the UI thread
@@ -383,6 +420,9 @@ impl App {
             coffee_until: -99.0,
             dizzy_until: -99.0,
             blink_at: 2.0,
+            shown: Pose::Idle,
+            prev_shown: Pose::Idle,
+            shown_at: -99.0,
             rng: seed | 1,
             inbox,
             outbox,
@@ -422,6 +462,10 @@ impl App {
             chat_pending: false,
             last_reply: String::new(),
             finished_at: -99.0,
+            work: log::Work::Plain,
+            oops_until: -99.0,
+            dazed_until: -99.0,
+            quiet_since: 0.0,
             voice_on,
             filler: 0,
             last_input: 0,
@@ -478,7 +522,7 @@ impl App {
         if self.shells.is_empty() && self.minis.iter().all(|m| m.done_at.is_some()) { Pose::Idle } else { Pose::Working }
     }
 
-    /// Back to her resting pose. Work going to Idle is confirmed finished: she shows Waiting briefly (your turn).
+    /// Back to her resting pose. Work going to Idle is confirmed finished: she shows Done briefly (your turn).
     fn settle(&mut self, t: f32) {
         let was = self.pose;
         self.pose = self.rest();
@@ -927,10 +971,11 @@ impl App {
                 let asking = v["hook_event_name"] == "PreToolUse" && v["tool_name"] == "AskUserQuestion" && followed;
                 if v["hook_event_name"] == "PreToolUse" && !asking && followed && !(self.pose == Pose::Waiting && t - self.waiting_since < 2.0) {
                     self.pose = Pose::Working;
+                    self.work = log::work_kind(v["tool_name"].as_str().unwrap_or(""), &v["tool_input"]);
                     self.label(log::tool_label(v["tool_name"].as_str().unwrap_or(""), &v["tool_input"]), t);
                 }
                 // Claude Code is closing, which stops its background commands.
-                // Its unfinished agents stop too. She says goodbye with a brief Waiting pose.
+                // Its unfinished agents stop too. She says goodbye with a brief Done pose.
                 if v["hook_event_name"] == "SessionEnd" && followed {
                     self.shells.clear();
                     self.minis.retain(|m| m.done_at.is_some());
@@ -988,13 +1033,21 @@ impl App {
             Event::Prompt => {
                 rewrite::prewarm(rewrite::persona()); // ready for this turn's reply
                 self.pose = Pose::Working;
+                self.work = log::Work::Plain;
                 self.bubble = None;
                 self.pending_reply = None;
             }
-            Event::Tool(text) | Event::Note(text) => {
+            Event::Tool(text, work) => {
+                self.pose = Pose::Working;
+                self.work = work;
+                self.label(text, t);
+            }
+            Event::Note(text) => {
                 self.pose = Pose::Working;
                 self.label(text, t);
             }
+            Event::Failed => self.oops_until = t + OOPS_FOR,
+            Event::Compact => self.dazed_until = t + DAZED_FOR,
             Event::AgentStart { id, label } => self.minis.push(Mini { id, label, done_at: None }),
             Event::AgentDone(id) => {
                 if let Some(m) = self.minis.iter_mut().find(|m| m.id == id) {
@@ -1119,11 +1172,29 @@ impl eframe::App for App {
 
         let poke_t = self.poke_at.map(|p| t - p).filter(|d| *d < 1.5);
         // The pose to show: music replaces idle, and optionally working; pokes and the tour override.
+        // Anything going on keeps her awake; poking or dragging her wakes her.
+        if self.pose != Pose::Idle || cheering || poke_t.is_some() || self.held || self.popup.is_some() || self.playing() || self.tour.is_some() || t < self.coffee_until {
+            self.quiet_since = t;
+        }
+        let asleep = t - self.quiet_since > SLEEP_AFTER;
         let mut pose = match self.pose {
+            Pose::Idle if asleep => Pose::Sleep,
             Pose::Idle if self.music.is_some() => Pose::Music,
+            Pose::Working if t < self.oops_until => Pose::Oops,
             Pose::Working if self.work_music => Pose::Music,
+            Pose::Working => match self.work {
+                log::Work::Plain => Pose::Working,
+                log::Work::Reading => Pose::Reading,
+                log::Work::Editing => Pose::Editing,
+                log::Work::Testing => Pose::Testing,
+                log::Work::Shipping => Pose::Shipping,
+                log::Work::Web => Pose::Web,
+            },
             p => p,
         };
+        if t < self.dazed_until && matches!(self.pose, Pose::Idle | Pose::Working) {
+            pose = Pose::Dazed;
+        }
         // The game takes her bubble space while open, except when Claude needs your OK.
         let game_shown = self.playing() && self.pose != Pose::Waiting;
         if game_shown {
@@ -1134,7 +1205,7 @@ impl eframe::App for App {
             };
         }
         if self.pose == Pose::Idle && t - self.finished_at < FINISHED_FLASH && !game_shown {
-            pose = Pose::Waiting;
+            pose = Pose::Done;
         }
         if cheering && !game_shown {
             pose = Pose::Cheer;
@@ -1178,7 +1249,7 @@ impl eframe::App for App {
             self.music = Some(true);
         }
         // Idle with nothing on screen for a while: sparkle and offer to help. Not while music plays: that's chill time.
-        if self.pose != Pose::Idle || cheering || t < self.coffee_until || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.playing() {
+        if self.pose != Pose::Idle || cheering || t < self.coffee_until || self.bubble.is_some() || poke_t.is_some() || self.music.is_some() || self.tour.is_some() || self.playing() || asleep {
             self.nudge_at = t + IDLE_NUDGE;
         } else if t > self.nudge_at {
             let line = self.pick(i18n::lines().idle);
@@ -1297,9 +1368,20 @@ impl eframe::App for App {
         let text = i18n::ui();
 
         let painter = ui.painter();
-        let sprite = &self.sprites[pose as usize];
-        let tex = if blinking { sprite.blink.as_ref().unwrap_or(&sprite.open) } else { &sprite.open };
-        draw_sprite(painter, tex, feet, HEIGHT, t, pose, poke_t.unwrap_or(9.0), self.swing);
+        if pose != self.shown {
+            (self.prev_shown, self.shown, self.shown_at) = (self.shown, pose, t);
+        }
+        let since = t - self.shown_at;
+        let fade = (since / POSE_FADE).min(1.0);
+        let tex = |p: Pose| {
+            let s = &self.sprites[p as usize];
+            if blinking { s.blink.as_ref().unwrap_or(&s.open) } else { &s.open }
+        };
+        if fade < 1.0 {
+            // The old pose fades out under the new one; squaring keeps her from looking see-through midway.
+            draw_sprite(painter, tex(self.prev_shown), feet, HEIGHT, t, self.prev_shown, 9.0, self.swing, 9.0, 1.0 - fade * fade);
+        }
+        draw_sprite(painter, tex(pose), feet, HEIGHT, t, pose, poke_t.unwrap_or(9.0), self.swing, since, fade);
         if pose == Pose::Coffee {
             // Steam curls up from the mug's rim (coffee.png has none painted), following her head tilt.
             let rim = feet + anim::warp(0.535, 0.286, t, pose, 9.0, aspect, Vec2::ZERO) * HEIGHT;
@@ -1335,6 +1417,15 @@ impl eframe::App for App {
                 sparkle(painter, head + vec2(a.cos() * 42.0, a.sin() * 9.0), 6.0 + 2.5 * a.sin(), fade);
             }
             ctx.request_repaint();
+        }
+        if pose == Pose::Sleep {
+            // Three Zs drift up beside her head (sleep.png's head sits around the middle of the canvas), growing as they rise.
+            for i in 0..3 {
+                let p = (t / 4.5 + i as f32 / 3.0).fract();
+                let at = pos2(body.left() + body.width() * (0.66 + 0.10 * p) + (p * 5.0).sin() * 4.0, body.top() + body.height() * (0.40 - 0.22 * p));
+                let alpha = (1.0 - p) * (p * 5.0).min(1.0);
+                painter.text(at, egui::Align2::CENTER_CENTER, "Z", FontId::proportional(12.0 + 10.0 * p), CORAL.gamma_multiply(alpha));
+            }
         }
         if pose == Pose::Waiting {
             let bob = (t * 6.0).sin().abs() * 6.0;
@@ -1384,9 +1475,9 @@ impl eframe::App for App {
             let side = if i % 2 == 0 { -1.0 } else { 1.0 };
             let dist = HEIGHT * aspect / 2.0 + mini_w / 2.0 - 12.0 + (i / 2) as f32 * mini_w * 0.6;
             let mfeet = feet + vec2(side * dist, 0.0);
-            let (mpose, text) = if m.done_at.is_some() { (Pose::Waiting, text.done) } else { (Pose::Working, m.label.as_str()) };
+            let (mpose, text) = if m.done_at.is_some() { (Pose::Done, text.done) } else { (Pose::Working, m.label.as_str()) };
             let mt = t + i as f32 * 0.7; // out of step with each other
-            draw_sprite(painter, &self.sprites[mpose as usize].open, mfeet, HEIGHT * MINI, mt, mpose, 9.0, Vec2::ZERO);
+            draw_sprite(painter, &self.sprites[mpose as usize].open, mfeet, HEIGHT * MINI, mt, mpose, 9.0, Vec2::ZERO, 9.0, 1.0);
             draw_box(painter, text, FontId::proportional(10.0), INK, 90.0, mfeet - vec2(0.0, HEIGHT * MINI + 2.0), false);
         }
 

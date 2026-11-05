@@ -103,3 +103,69 @@ Tips for this one:
 
 - Mini versions: the app reuses these images at half size.
 - Effects like the "!" above her head, sparkles, sweat drops and music notes: the app draws them.
+
+## Later poses
+
+`done.png`, `dizzy.png` and the blinks for done, editing, oops, reading and testing were made by script edits, not by an image tool. `sleep.png` was scaled to 0.81 so her head matches idle's, centred under idle's head and set on the same ground line. Websearch, shipping, sleep and dizzy have no blink: their eyes are closed or spirals.
+
+**[Pixel prop]**: paste this after the pose description wherever she holds something:
+> The [prop] is drawn as retro 8-bit pixel art: chunky visible square pixels, a small limited palette, no smooth gradients, like an item sprite from an old game. Only the [prop] is pixelated; she stays in the smooth anime style.
+
+Shared tips:
+- Keep held props and the arm holding them clear of her hair and face. The app sways her hair tips and could bend a prop that overlaps them.
+- Keep her feet on the same spot as the master, and keep everything inside the canvas with some margin.
+- Blink images: edit the open-eyes image and change only the eyes.
+
+### 19. `oops.png` (a command or test failed)
+> [Character] Same character as the reference image. She stands sobbing quietly because something just went wrong, her hands clasped together in front of her skirt, sleeves drooping over them. Her eyes are half open and glossy, tears welling along the lower lids, one small tear rolling down each cheek. Her lower eyelids are lightly puffy and swollen with a soft red-pink tint, as if she has been crying a little. Brows tilted up sharply in the middle, a small wobbly frown with the bottom lip trembling, a stronger blush across her nose and cheeks, shoulders slightly hunched. Sad but cute, not bawling: no open wailing mouth, no streams of tears. Same standing position and body size as the reference, feet together on the same spot. [Style]
+
+### 19b. `oops_blink.png` (optional, edit of oops.png)
+> Edit this image: close her eyes tightly into small downward curves, as if squeezing back tears, keeping the puffy red lower lids, the tears on her cheeks and the wobbly frown. Change nothing else.
+
+Tips:
+- If the swollen lids come out as dark bruise-like shadows, ask for "soft pink, slightly puffy lower eyelids" instead.
+- If the tool adds big anime tear streams or a crying open mouth, regenerate: she only sobs slightly.
+- Keep her hands in front of her skirt, not up at her face: the app tilts her head, and a hand touching it would bend along with it.
+
+### 20. `reading.png` (Claude is reading or searching files)
+> [Character] Same character as the reference image. She is investigating like a little detective: leaning forward from the hips with curiosity, holding a magnifying glass in her right hand (on the viewer's left) out in front of her at face height, peering through it with one eye wide and interested, brows raised, a small "hmm" mouth. Her other arm is tucked behind her lower back. [Pixel prop, with prop = magnifying glass] Same body size as the reference, feet together on the same spot. [Style]
+
+### 21. `reading_blink.png` (edit of reading.png)
+> Edit this image: close her eyes into soft curves, keeping her face toward the magnifying glass. Change nothing else.
+
+### 22. `editing.png` (Claude is editing or writing files)
+> [Character] Same character as the reference image. She is busily hammering, like a little craftsman fixing something: her right hand (on the viewer's left) holds a hammer raised up beside her head, mid-swing, arm bent at the elbow and well away from her hair; her left hand is a determined fist at her waist. Focused eyes looking down and slightly to the side, tongue poking out of the corner of her mouth in concentration. [Pixel prop, with prop = hammer] Same body size as the reference, feet together on the same spot. [Style]
+
+### 23. `editing_blink.png` (edit of editing.png)
+> Edit this image: close her eyes into focused curves, keeping the tongue and the hammer. Change nothing else.
+
+Tips: the app can swing the hammer arm like the music pose's hand, so the forearm, hand and hammer need empty space around them.
+
+### 24. `testing.png` (Claude is running tests)
+Recommended: she hunts bugs with a bug-catching net. It reads as "looking for bugs", and it pairs with `oops.png` when a test fails.
+> [Character] Same character as the reference image. She is hunting for bugs: holding a bug-catching net with both hands, the long handle angled across her body and the net raised up beside her on the viewer's right, clear of her hair. Eyes sharp and alert, glancing to the side as if spotting something, a determined little grin. [Pixel prop, with prop = bug-catching net] Same body size as the reference, feet together on the same spot. [Style]
+
+### 25. `testing_blink.png` (edit of testing.png)
+> Edit this image: close her eyes, keeping the determined grin. Change nothing else.
+
+### 26. `shipping.png` (Claude commits or pushes)
+> [Character] Same character as the reference image. She is carrying a tall wobbly stack of five heavy books balanced on top of her head, both hands raised up steadying the stack from the sides, knees slightly bent under the weight. Straining but proud: eyes squeezed half shut, cheeks puffed, a brave wobbly smile, a light blush. [Pixel prop, with prop = stack of books] Same body size as the reference, feet on the same spot. [Style]
+
+### 27. `shipping_blink.png` (edit of shipping.png)
+> Edit this image: close her eyes fully, keeping the strained smile. Change nothing else.
+
+Tips: the stack must fit inside the canvas with a margin above it. If the tool makes it too tall, ask for three books.
+
+### 28. `websearch.png` (Claude searches the web)
+> [Character] Same character as the reference image. She is hugging a big chunky "www" sign in her arms, holding it in front of her chest so the three letters are clearly readable, cheek pressed lovingly against the top of it, eyes closed in happy curves, a big content smile, rosy cheeks. [Pixel prop, with prop = "www" letters] Same body size as the reference, feet together on the same spot. [Style]
+
+No blink needed: her eyes are closed. Despite [Style]'s "no text", the "www" letters are wanted here. If the tool garbles them, regenerate.
+
+### 29. `sleep.png` (after 10 minutes with nothing happening)
+> [Character] Same character as the reference image. She has dozed off sitting on the ground: sitting with both legs folded together and tilted to one side (her knees pointing to the viewer's right, her loafers tucked out to the viewer's left), her back gently bent forward and her shoulders relaxed and slumped, both hands resting loosely on her thigh, sleeves drooping over them. Her head droops forward and tilts slightly to one side. Serene sleeping face: eyes softly closed in relaxed curves, a tiny peaceful smile, a faint blush. She sits at the bottom of the image, centred where the reference stands. [Style]
+
+No blink needed. The app draws the "Zzz".
+
+Tips: she'll be much shorter sitting. Keep her centred, with her folded legs resting on the bottom edge where the master's feet are: the app lines poses up by the bottom of the image.
+
+A skin missing one of these borrows: waiting for done, idle for dizzy, sleep and oops, working for reading, editing, testing, shipping and websearch.

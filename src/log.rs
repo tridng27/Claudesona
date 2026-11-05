@@ -6,10 +6,24 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// What a tool call is doing, for her working pose.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum Work {
+    #[default]
+    Plain, // anything else: the usual working pose
+    Reading,  // Read, Grep, Glob
+    Editing,  // Edit, Write, NotebookEdit
+    Testing,  // a shell command that runs tests
+    Shipping, // git commit / git push
+    Web,      // WebSearch, WebFetch
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Prompt,                                   // you sent a message: she starts working
-    Tool(String),                             // short activity label
+    Tool(String, Work),                       // short activity label, and what kind of work it is
+    Failed,                                   // a tool call came back with an error
+    Compact,                                  // Claude compacted its context
     Note(String),                             // Claude's text between tool calls, cleaned and short
     Reply(String),                            // Claude's final text of the turn, raw (goes to the rewriter)
     TurnEnd,                                  // the turn is over
@@ -21,7 +35,8 @@ pub enum Event {
 
 pub fn parse_line(line: &str) -> Vec<Event> {
     let Ok(d) = serde_json::from_str::<Value>(line) else { return vec![] };
-    if d["isMeta"] == true || d["isSidechain"] == true {
+    // The summary after a compaction is logged as a "user" line, but nobody typed it.
+    if d["isMeta"] == true || d["isSidechain"] == true || d["isCompactSummary"] == true {
         return vec![];
     }
     let content = &d["message"]["content"];
@@ -31,6 +46,8 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             let typed = content.as_str().is_some_and(|s| !s.trim_start().starts_with('<'));
             let blocks = content.as_array().into_iter().flatten();
             let has_text = blocks.clone().any(|b| b["type"] == "text");
+            // A failed command or edit; the user (or a hook, setting or classifier) saying no doesn't count.
+            let failed = blocks.clone().any(|b| b["type"] == "tool_result" && b["is_error"] == true && !refused(&b["content"]));
             // A background agent's tool_result only says it launched; its end comes as a <task-notification>.
             let launched = d["toolUseResult"]["status"] == "async_launched";
             let mut events: Vec<Event> = blocks
@@ -39,6 +56,9 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                 .collect();
             if typed || has_text {
                 events.insert(0, Event::Prompt);
+            }
+            if failed {
+                events.push(Event::Failed);
             }
             // Run in the background, or moved there after the 2-minute timeout.
             if let Some(id) = d["toolUseResult"]["backgroundTaskId"].as_str() {
@@ -69,7 +89,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                     }
                     Some("tool_use") => {
                         let name = b["name"].as_str().unwrap_or("");
-                        let mut v = vec![Event::Tool(tool_label(name, &b["input"]))];
+                        let mut v = vec![Event::Tool(tool_label(name, &b["input"]), work_kind(name, &b["input"]))];
                         if matches!(name, "Agent" | "Task") {
                             let label = b["input"]["description"].as_str().unwrap_or("helper");
                             v.push(Event::AgentStart { id: b["id"].as_str().unwrap_or("").to_string(), label: clean(label, 18) });
@@ -81,6 +101,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                 .collect()
         }
         Some("system") if d["subtype"] == "turn_duration" => vec![Event::TurnEnd],
+        Some("system") if d["subtype"] == "compact_boundary" => vec![Event::Compact],
         _ => vec![],
     }
 }
@@ -91,6 +112,35 @@ fn task_notification(text: Option<&str>) -> Vec<Event> {
     let Some(body) = text.and_then(|s| s.strip_prefix("<task-notification>")) else { return vec![] };
     let tag = |t: &str| Some(body.split(&format!("<{t}>")).nth(1)?.split('<').next()?.to_string());
     tag("task-id").map(Event::ShellDone).into_iter().chain(tag("tool-use-id").map(Event::AgentDone)).collect()
+}
+
+/// An error result that only says no: the user rejected or interrupted it, or a hook, setting or classifier denied it.
+fn refused(content: &Value) -> bool {
+    let text = content.as_str().or_else(|| content[0]["text"].as_str()).unwrap_or("");
+    ["The user doesn't want to proceed", "[Request interrupted by user", "Permission to use ", "Permission for this action was denied", "PreToolUse:"]
+        .iter()
+        .any(|p| text.starts_with(p))
+}
+
+/// What kind of work a tool call is (also used for the PreToolUse hook's tool_name and tool_input).
+pub fn work_kind(name: &str, input: &Value) -> Work {
+    match name {
+        "Read" | "Grep" | "Glob" => Work::Reading,
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => Work::Editing,
+        "WebSearch" | "WebFetch" => Work::Web,
+        "Bash" | "PowerShell" => {
+            let cmd = input["command"].as_str().unwrap_or("");
+            let c = words(cmd);
+            if c.contains(" git commit ") || c.contains(" git push ") {
+                Work::Shipping
+            } else if command_kind(cmd) == 0 {
+                Work::Testing
+            } else {
+                Work::Plain
+            }
+        }
+        _ => Work::Plain,
+    }
 }
 
 pub fn tool_label(name: &str, input: &Value) -> String {
@@ -107,6 +157,11 @@ pub fn tool_label(name: &str, input: &Value) -> String {
     }
 }
 
+/// The command lowercased and padded, with separators as spaces, so " word " matches whole words.
+fn words(cmd: &str) -> String {
+    format!(" {} ", cmd.to_lowercase().replace(['\n', '\r', '\t', ';', '|', '&', '(', ')'], " "))
+}
+
 /// Her line for a shell command, in the current language. Same command, same line; different commands vary.
 fn command_line(cmd: &str) -> &'static str {
     let lines = crate::i18n::lines().commands[command_kind(cmd)];
@@ -116,9 +171,10 @@ fn command_line(cmd: &str) -> &'static str {
 /// What kind of shell command it is: 0 tests, 1 git, 2 installs, 3 builds, 4 running the app, 5 web, 6 deleting,
 /// 7 looking around, 8 anything else. First matching kind wins.
 fn command_kind(cmd: &str) -> usize {
-    let c = format!(" {} ", cmd.to_lowercase().replace(['\n', ';', '|', '&', '(', ')'], " "));
+    let c = words(cmd);
     let has = |keys: &[&str]| keys.iter().any(|k| c.contains(k));
-    if has(&["test", "pytest", "jest", "vitest"]) {
+    // Whole test-runner words, so paths like tests/foo.rs and the shell's `test -f` don't count.
+    if has(&[" cargo test ", " cargo nextest ", " npm test ", " npm run test", " pnpm test ", " yarn test ", " npx jest", " jest ", "pytest", "vitest", " go test ", " dotnet test ", " mvn test ", "gradle test ", " gradlew test ", " ctest ", " -m unittest ", " rspec ", " mocha ", " phpunit ", "invoke-pester"]) {
         0
     } else if has(&[" git ", " gh "]) {
         1
@@ -231,10 +287,10 @@ mod tests {
         assert_eq!(parse_line(image_prompt), vec![Event::Prompt]);
         assert!(parse_line(meta).is_empty() && parse_line(command).is_empty());
         assert_eq!(parse_line(result), vec![Event::AgentDone("t1".into())]);
-        assert_eq!(parse_line(tool), vec![Event::Tool("Reading main.rs…".into())]);
+        assert_eq!(parse_line(tool), vec![Event::Tool("Reading main.rs…".into(), Work::Reading)]);
         assert_eq!(parse_line(text), vec![Event::Reply("Done! **Bold** and `code`.".into())]);
         assert_eq!(parse_line(note), vec![Event::Note("Checking files.".into())]);
-        assert_eq!(parse_line(agent), vec![Event::Tool("Sending a helper…".into()), Event::AgentStart { id: "a1".into(), label: "Find auth code".into() }]);
+        assert_eq!(parse_line(agent), vec![Event::Tool("Sending a helper…".into(), Work::Plain), Event::AgentStart { id: "a1".into(), label: "Find auth code".into() }]);
         assert_eq!(parse_line(agent_result), vec![Event::AgentDone("a1".into())]);
         assert_eq!(parse_line(turn_end), vec![Event::TurnEnd]);
         assert!(parse_line(thinking).is_empty() && parse_line("not json").is_empty());
@@ -255,6 +311,53 @@ mod tests {
     }
 
     #[test]
+    fn failures_and_compaction() {
+        let failed = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Exit code 1\nerror[E0425]: x","is_error":true,"tool_use_id":"t1"}]},"toolUseResult":"Error: Exit code 1\nerror[E0425]: x"}"#;
+        let bad_edit = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"<tool_use_error>String to replace not found in file.</tool_use_error>","is_error":true,"tool_use_id":"t2"},{"type":"tool_result","content":"File does not exist.","is_error":true,"tool_use_id":"t3"}]}}"#;
+        let rejected = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.","is_error":true,"tool_use_id":"t4"}]},"toolUseResult":"User rejected tool use"}"#;
+        let interrupted = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"The user doesn't want to proceed with this tool use.","is_error":true,"tool_use_id":"t5"},{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#;
+        let denied = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Permission to use Bash with command ls has been denied.","is_error":true,"tool_use_id":"t6"}]}}"#;
+        let classifier = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"Permission for this action was denied by the Claude Code auto mode classifier. Reason: [x].","is_error":true,"tool_use_id":"t7"}]}}"#;
+        let hook = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"PreToolUse:mcp__x hook error: [guard] no.","is_error":true,"tool_use_id":"t8"}]}}"#;
+        assert_eq!(parse_line(failed), vec![Event::AgentDone("t1".into()), Event::Failed]);
+        assert_eq!(parse_line(bad_edit), vec![Event::AgentDone("t2".into()), Event::AgentDone("t3".into()), Event::Failed]);
+        assert_eq!(parse_line(rejected), vec![Event::AgentDone("t4".into())]);
+        assert_eq!(parse_line(interrupted), vec![Event::Prompt, Event::AgentDone("t5".into())]);
+        for no in [denied, classifier, hook] {
+            assert!(!parse_line(no).contains(&Event::Failed), "{no}");
+        }
+        let compact = r#"{"parentUuid":null,"logicalParentUuid":"p0","isSidechain":false,"type":"system","subtype":"compact_boundary","content":"Conversation compacted","isMeta":false,"level":"info","compactMetadata":{"trigger":"auto","preTokens":365701}}"#;
+        let summary = r#"{"parentUuid":"c0","isSidechain":false,"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context."},"isVisibleInTranscriptOnly":true,"isCompactSummary":true}"#;
+        assert_eq!(parse_line(compact), vec![Event::Compact]);
+        assert!(parse_line(summary).is_empty());
+    }
+
+    #[test]
+    fn work_kinds() {
+        let kind = |name: &str, input: &str| work_kind(name, &serde_json::from_str(input).unwrap());
+        let sh = |cmd: &str| work_kind("Bash", &serde_json::json!({ "command": cmd }));
+        assert_eq!(kind("Read", r#"{"file_path":"src/a.rs"}"#), Work::Reading);
+        assert_eq!(kind("Grep", r#"{"pattern":"x"}"#), Work::Reading);
+        assert_eq!(kind("Glob", r#"{"pattern":"**/*.rs"}"#), Work::Reading);
+        assert_eq!(kind("Edit", r#"{"file_path":"a.rs","old_string":"a","new_string":"b"}"#), Work::Editing);
+        assert_eq!(kind("Write", r#"{"file_path":"a.rs","content":""}"#), Work::Editing);
+        assert_eq!(kind("NotebookEdit", r#"{"notebook_path":"a.ipynb"}"#), Work::Editing);
+        assert_eq!(kind("WebSearch", r#"{"query":"x"}"#), Work::Web);
+        assert_eq!(kind("WebFetch", r#"{"url":"https://x"}"#), Work::Web);
+        assert_eq!(kind("Agent", r#"{"description":"x"}"#), Work::Plain);
+        assert_eq!(kind("PowerShell", r#"{"command":"cargo test log::"}"#), Work::Testing);
+        assert_eq!(sh("cd /c/x && cargo test log::"), Work::Testing);
+        assert_eq!(sh("npx vitest run"), Work::Testing);
+        assert_eq!(sh("python -m pytest -q"), Work::Testing);
+        assert_eq!(sh("npm run test:unit"), Work::Testing);
+        assert_eq!(sh("git add -A && git commit -m \"fix\""), Work::Shipping);
+        assert_eq!(sh("cargo test && git push origin main"), Work::Shipping);
+        assert_eq!(sh("cat tests/foo.rs"), Work::Plain);
+        assert_eq!(sh("test -f .env && echo ok"), Work::Plain);
+        assert_eq!(sh("git status"), Work::Plain);
+    }
+
+    #[test]
     fn reads_only_whole_lines() {
         let path = std::env::temp_dir().join(format!("claudesona-log-test-{}.jsonl", std::process::id()));
         std::fs::write(&path, "{\"a\":1}\n{\"b\":").unwrap();
@@ -271,6 +374,7 @@ mod tests {
         let first = |cmd: &str| crate::i18n::lines().commands[command_kind(cmd)][0];
         let is = |cmd: &str, word: &str| assert!(first(cmd).to_lowercase().contains(word), "{cmd} -> {}", first(cmd));
         is("cargo test parse", "test");
+        is("cat tests/foo.rs", "files");
         is("cd /c/x && git status", "git");
         is("npm install", "packages");
         is("cargo build --release", "build");
