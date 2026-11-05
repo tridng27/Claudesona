@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Claudesona is a Rust desktop mascot for Windows, macOS and Linux: a chibi anime girl who mirrors Claude Code's terminal work as speech bubbles. It's developed on Windows; macOS and Linux are built and tested by the GitHub Actions workflow (`.github/workflows/build.yml`) and haven't been run on real machines yet.
 - `SPEC.md` holds the product decisions (phases, bubbles, minis, interaction, rewriter flags). Read it before changing behavior, and update it when a decision changes.
+- `SPEC-v2.md` (gitignored, local only) holds v2: she hosts Claude Code sessions herself, takes voice input, manages MCP servers, and keeps a larger memory. v2 is built on `main`; where the two specs disagree, v2 wins.
 - `README.md` covers install, uninstall and deploying to other machines.
 
 Status as of 2026-11-02: everything in SPEC.md works on Windows except WSL support. Turn logic:
@@ -36,14 +37,25 @@ One exe, several modes (`src/main.rs` dispatches on the first argument):
 - **`hook`** (`src/cli.rs`): run by Claude Code's `SessionStart`, `SessionEnd`, `Notification`, `PermissionRequest` and `PreToolUse` (Bash|PowerShell) hooks. It forwards the hook JSON to the app over TCP. If the app isn't running and the event is `SessionStart`, it launches the app detached.
 - **`install` / `uninstall`** (`src/cli.rs`): copy the exe and edit `~/.claude/settings.json`. Results show in a message box, because the exe has no console.
 
+Two kinds of session:
+- **Mirrored** (v1): Claude Code runs in a terminal; she reads its log and hooks, watch-only.
+- **Hosted** (v2, `src/session.rs`): she runs `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio …` and drives it over stdin/stdout. While one exists, log and hook events are ignored. One at a time.
+
 Data flow into the UI thread, all on one `mpsc` channel (`Msg`):
 - the log poller thread (`src/log.rs`): `Msg::Log(session path, Event)`
 - the TCP listener thread: `Msg::Hook(json)`, e.g. a permission prompt, or `{"quit":true}` from install/uninstall
 - rewrite threads (`src/rewrite.rs`, one `claude -p` per reply): `Msg::Rewritten`
+- the hosted session's reader thread: `Msg::Stream(n, stream::Event)`; `n` drops late events from an ended session
+- speech to text (`src/stt.rs`): `Msg::Heard`; spoken and typed input both go through `src/router.rs` (one Haiku call → an `Action`)
+
+Other v2 modules: `src/panel.rs` (session panel window: turn cards, steps, Memory and Services tabs), `src/memgraph.rs` (memory graph view), `src/services.rs` (`mcp.json` next to the exe; the enabled servers are written to `mcp-session.json` and passed with `--mcp-config`).
 
 ## Rules
 
 - Everything that knows Claude Code's log format lives in `src/log.rs`. The format is internal and unversioned. Its tests use real line shapes; when a Claude Code update breaks parsing, add the new shape to the tests first.
+- Everything that knows the stream-json format lives in `src/stream.rs`, tested against real lines in `tests/fixtures/stream/`. The final reply is `result.result` (with partial messages on, `stop_reason` is always null). Helper steps carry `parent`; they show in the panel but never drive her pose.
+- Hosted sessions run with the user's settings, hooks and plugins (no `--restricted`): they're the user's real sessions. Only her own helper calls (rewriter, router, chat, summaries) use the restricted flag set.
+- Speech to text is pure-Rust Whisper (`candle`) so the macOS and Linux cross-checks need no C toolchain; don't swap in whisper.cpp. The model is `model/whisper-small/` next to the exe (`config.json`, `tokenizer.json`, `model.safetensors`).
 - Poll log files; don't use file-change notifications. They don't fire on `\\wsl.localhost` paths, which WSL support will need.
 - The hook must print nothing (SessionStart output is added to Claude's context; PermissionRequest and PreToolUse output could answer the dialog). Before spawning the app, it must clear the inherit flag on its std handles, or Claude Code waits forever on the hook's pipe.
 - After a permission prompt, log activity in the next 2s doesn't end Waiting. Claude Code writes its log late, so lines from just before the prompt still arrive.
@@ -61,4 +73,5 @@ Data flow into the UI thread, all on one `mpsc` channel (`Msg`):
 
 - Windows 11. Claude Code runs in the VS Code terminal, cmd, PowerShell, and sometimes WSL Ubuntu.
 - WSL isn't installed on this PC as of 2026-11-02, so WSL support can't be tested here.
-- Hook fields and rewriter flags were checked against Claude Code 2.1.316.
+- Hook fields and rewriter flags were checked against Claude Code 2.1.316; stream-json, stdio permissions, interrupt and headless slash commands against 2.1.318.
+- The user's installed copy usually holds port 47827. For a live test of a dev build, change the port temporarily and don't commit it.
