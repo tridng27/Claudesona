@@ -11,6 +11,7 @@ raw-window-handle = "0.6"
 model2vec-rs = { version = "0.4", default-features = false } # her memory's embeddings; model downloaded on first chat
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] } # pure-Rust regex for model2vec (onig and esaxx need a C toolchain per target)
 rodio = { version = "0.23", default-features = false, features = ["playback", "flac", "mp3", "mp4", "vorbis", "wav"] } # audio everywhere: her songs and your files
+rfd = "0.17.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

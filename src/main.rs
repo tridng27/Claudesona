@@ -25,9 +25,10 @@ use anim::Pose;
 use eframe::egui::{self, Color32, FontId, Key, Mesh, Painter, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2, ViewportCommand, ViewportId, pos2, vec2};
 use log::Event;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use std::collections::HashSet;
 use std::io::Read;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Instant;
 
@@ -69,8 +70,16 @@ const VOICE_KEY: &str = "voice"; // her voice on or off
 const MUSIC_MODE_KEY: &str = "music_mode"; // Loop / Loop 1 / Shuffle
 const PLAYLIST_KEY: &str = "playlist"; // name of the playlist to play
 const LANG_KEY: &str = "lang"; // EN or VI
+const MIC_KEY: &str = "stt_listening"; // the microphone on or off (speech to text is still to come)
+const QUIT_WAIT: f64 = 40.0; // most seconds quitting waits for the ended session's summary
 
 enum Msg {
+    Stream(u64, stream::Event), // from the hosted session with that number
+    Started(u64, Result<session::Session, String>, Option<String>), // its process, and what happened there last time
+    Routed(router::Action),     // what your message to her is for
+    Picked(Option<PathBuf>),    // the folder picker's answer
+    Past(Vec<log::Past>),       // saved sessions, newest first
+    Summarized,                 // an ended session's summary is stored (or failed): a quit can go on
     Log(PathBuf, Event),
     Rewritten { short: String, long: Option<String>, at: f64 }, // `at`: when its reply arrived, to match it
     Game { word: String, hint: String }, // a new hangman word from Haiku
@@ -111,6 +120,18 @@ struct Popup {
     voice_id: String,
     voice_key: String,    // used once to make the voice, never saved
     confirm_reset: bool,  // "Back to her default voice" was clicked once
+    sessions: bool,       // the recent sessions list is open
+}
+
+/// A Claude Code session she runs herself (SPEC-v2.md, Hosted sessions). While there is one, she shows it
+/// and ignores the terminal; mirror mode comes back when it ends.
+struct Hosted {
+    n: u64,                            // its events carry this; an ended session's late ones are dropped
+    session: Option<session::Session>, // None until its process has started (on a worker)
+    queue: Vec<String>,                // messages sent before that
+    dir: PathBuf,
+    slash: Vec<String>,                // slash commands it offers, from its init line
+    always: HashSet<String>,           // tools you said "Always" to: she allows them herself until it ends
 }
 
 struct Mini {
@@ -330,6 +351,17 @@ struct App {
     typed_at: f64,      // last keystroke while she's cheering you on
     cheer_until: f64,   // cheering because a prompt was just sent
     cheer_said: f64,    // when she last said a cheer line
+    body: Rect,         // her body in her window last frame, for placing the popup and panel
+    hosted: Option<Hosted>,
+    hosted_n: u64,
+    timeline: panel::Timeline, // the hosted session's turns, kept after it ends until the next one starts
+    reply_turn: Option<(f64, usize)>, // the reply being rewritten (as Msg::Rewritten's `at`) and its turn
+    panel: Option<panel::PanelState>,
+    graph: memgraph::GraphState,
+    past: Vec<log::Past>,
+    mic_on: bool,       // remembered; no speech to text yet
+    asking_quit: bool,  // "Claude's still working, stop it?" is up with Yes / No
+    quit_at: Option<f64>, // quitting once the ended session's summary is stored, or at this time
 }
 
 impl App {
@@ -402,6 +434,7 @@ impl App {
                 }
             }
         });
+        load_past(outbox.clone(), ctx.clone());
         // Restore the music choices; the player thread starts and reads the music folder in the background.
         let saved = |key: &str| cc.storage.and_then(|s| s.get_string(key));
         let music_mode = saved(MUSIC_MODE_KEY).and_then(|m| music::Mode::from_label(&m)).unwrap_or(music::Mode::Shuffle);
@@ -480,6 +513,17 @@ impl App {
             typed_at: -99.0,
             cheer_until: -99.0,
             cheer_said: -99.0,
+            body: Rect::NOTHING,
+            hosted: None,
+            hosted_n: 0,
+            timeline: panel::Timeline::default(),
+            reply_turn: None,
+            panel: None,
+            graph: memgraph::GraphState::default(),
+            past: vec![],
+            mic_on: saved(MIC_KEY).is_none_or(|v| v == "true"),
+            asking_quit: false,
+            quit_at: None,
         }
     }
 
@@ -692,17 +736,31 @@ impl App {
         }
     }
 
-    /// The popup beside her, on whichever side has more room.
-    fn open_popup(&self, body: Rect, t: f64) -> Option<Popup> {
-        let inner = self.ctx.input(|i| i.viewport().inner_rect)?;
-        let her = body.translate(inner.min.to_vec2());
+    /// Her body on screen and the desktop area windows beside her must stay inside, in points.
+    fn her_on_screen(&self) -> Option<(Rect, Rect)> {
+        let inner = self.ctx.input_for(ViewportId::ROOT, |i| i.viewport().inner_rect)?;
         let work = os::work_area(self.hwnd)
             .map(|w| w / self.ctx.zoom_factor())
-            .or_else(|| self.ctx.input(|i| i.viewport().monitor_size).map(|m| Rect::from_min_size(Pos2::ZERO, m)))
+            .or_else(|| self.ctx.input_for(ViewportId::ROOT, |i| i.viewport().monitor_size).map(|m| Rect::from_min_size(Pos2::ZERO, m)))
             .unwrap_or(Rect::EVERYTHING);
+        Some((self.body.translate(inner.min.to_vec2()), work))
+    }
+
+    /// The popup beside her, on whichever side has more room.
+    fn open_popup(&self, t: f64) -> Option<Popup> {
+        let (her, work) = self.her_on_screen()?;
         let left = her.center().x > work.center().x;
-        rewrite::prewarm(chat::persona()); // you'll likely type: have Haiku ready
-        Some(Popup { her, work, left, size: vec2(POPUP_W, 360.0), input: String::new(), frames: 0, opened: t, had_focus: false, memories: false, confirm_forget: false, voice_setup: false, voice_id: String::new(), voice_key: String::new(), confirm_reset: false })
+        router::prewarm(); // you'll likely type: have Haiku ready to route it
+        rewrite::prewarm(chat::persona()); // and to chat
+        load_past(self.outbox.clone(), self.ctx.clone());
+        Some(Popup { her, work, left, size: vec2(POPUP_W, 360.0), input: String::new(), frames: 0, opened: t, had_focus: false, memories: false, confirm_forget: false, voice_setup: false, voice_id: String::new(), voice_key: String::new(), confirm_reset: false, sessions: false })
+    }
+
+    fn open_panel(&mut self) {
+        if let Some((her, work)) = self.her_on_screen() {
+            self.panel = Some(panel::PanelState::new(her, work));
+            self.popup = None;
+        }
     }
 
     fn show_popup(&mut self, ctx: &egui::Context, t: f64) {
@@ -766,6 +824,37 @@ impl App {
                     }
                 }
             });
+            ui.horizontal(|ui| {
+                if ui.button(text.new_session).clicked() {
+                    self.pick_folder(t);
+                    close = true;
+                }
+                if ui.button(text.open_panel).clicked() {
+                    self.open_panel();
+                    close = true;
+                }
+            });
+            if ui.selectable_label(p.sessions, text.recent_sessions).clicked() {
+                p.sessions = !p.sessions;
+            }
+            if p.sessions {
+                if self.past.is_empty() {
+                    ui.label(RichText::new(text.no_sessions).small().color(SOFT_INK));
+                }
+                let mut resume = None;
+                egui::ScrollArea::vertical().id_salt("sessions").max_height(160.0).show(ui, |ui| {
+                    for s in self.past.iter().take(15) {
+                        let row = format!("{} · {}", folder_name(&s.dir), clip(&s.title, 34));
+                        if ui.selectable_label(false, RichText::new(row).small()).clicked() {
+                            resume = Some(s.clone());
+                        }
+                    }
+                });
+                if let Some(s) = resume {
+                    self.start_session(s.dir, Some(s.id), t);
+                    close = true;
+                }
+            }
             if ui.button(if self.music.is_some() { text.stop_music } else { text.play_music }).clicked() {
                 self.set_music(self.music.is_none(), t);
                 close = true;
@@ -802,9 +891,11 @@ impl App {
                 close = true;
             }
             if ui.button(text.quit).clicked() {
-                ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+                self.quit(t);
+                close = true;
             }
 
+            ui.checkbox(&mut self.mic_on, text.microphone);
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut self.voice_on, text.voice).changed() {
                     voice::set_on(self.voice_on);
@@ -880,7 +971,7 @@ impl App {
                 edit.request_focus();
             }
             if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !p.input.trim().is_empty() && !self.chat_pending {
-                self.send_chat(p.input.trim().to_string(), t);
+                self.route_input(p.input.trim().to_string(), t);
                 close = true;
             }
         });
@@ -919,13 +1010,326 @@ impl App {
         });
     }
 
+    /// Works out what your message is for (router.rs) on a worker thread; `act` does it.
+    fn route_input(&mut self, text: String, t: f64) {
+        self.chat_pending = true;
+        self.label(i18n::ui().chat_thinking.into(), t);
+        let mut known: Vec<String> = self.past.iter().map(|p| folder_name(&p.dir)).collect();
+        known.dedup();
+        let ctx = router::RouteCtx {
+            waiting_for_permission: self.hosted.is_some() && !self.timeline.pending.is_empty(),
+            has_session: self.hosted.is_some(),
+            slash_commands: self.hosted.as_ref().map(|h| h.slash.clone()).unwrap_or_default(),
+            known_projects: known,
+            project_files: vec![], // only used to fix misheard names in speech
+            language: self.lang,
+        };
+        let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
+        router::route(&text, ctx, false, move |a| {
+            let _ = tx.send(Msg::Routed(a));
+            wake.request_repaint();
+        });
+    }
+
+    fn act(&mut self, action: router::Action, t: f64) {
+        use router::{Action, SessionCmd};
+        match action {
+            Action::Chat(text) => self.send_chat(text, t),
+            Action::Say(line) => self.say(line, None, t),
+            Action::Prompt { text } => self.send_prompt(text, true, t),
+            Action::Slash { command, args } => self.send_prompt(format!("/{command} {args}").trim_end().to_string(), false, t),
+            Action::Answer { allow, always } => self.answer(None, allow, always),
+            Action::Summarize => self.summarize(t),
+            Action::Remember(fact) => self.send_chat(format!("Remember: {fact}"), t), // her chat's keeper stores it
+            Action::Forget(what) => self.send_chat(format!("Forget: {what}"), t),
+            Action::Session(SessionCmd::New { project }) => match matching_dirs(&self.past, project.as_deref()).as_slice() {
+                [dir] => self.start_session(dir.clone(), None, t),
+                _ => self.pick_folder(t),
+            },
+            Action::Session(SessionCmd::Resume { hint }) => match hint.and_then(|h| self.past.iter().find(|p| matches_hint(p, &h)).cloned()) {
+                Some(p) => self.start_session(p.dir, Some(p.id), t),
+                None => {
+                    self.popup = self.open_popup(t);
+                    if let Some(p) = &mut self.popup {
+                        p.sessions = true;
+                    }
+                }
+            },
+            Action::Session(SessionCmd::Interrupt) => {
+                if let Some(s) = self.hosted.as_mut().and_then(|h| h.session.as_mut()) {
+                    let _ = s.interrupt();
+                }
+            }
+            Action::Session(SessionCmd::End) => {
+                if self.hosted.is_some() {
+                    self.end_session(t);
+                    self.say(i18n::ui().session_closed.into(), None, t);
+                }
+            }
+        }
+    }
+
+    /// Sends a prompt (or a slash command) to the hosted session, starting one in her home folder if there's none.
+    fn send_prompt(&mut self, text: String, learn: bool, t: f64) {
+        if self.hosted.is_none() {
+            self.start_session(home_dir(), None, t);
+        }
+        let Some(h) = self.hosted.as_mut() else { return };
+        match &mut h.session {
+            Some(s) => {
+                let _ = s.send(&text); // a dead process sends Exit, which ends the session
+            }
+            None => h.queue.push(text.clone()),
+        }
+        self.timeline.user_prompt(&text, None);
+        if learn {
+            chat::learn_from_prompt(&text);
+        }
+        (self.tour, self.cheer_until) = (None, t + CHEER_ON_SEND);
+        self.apply(Event::Prompt, t);
+    }
+
+    /// Starts a hosted session in `dir` (resuming `resume`), ending the current one. The process starts on a worker.
+    fn start_session(&mut self, dir: PathBuf, resume: Option<String>, t: f64) {
+        self.end_session(t);
+        self.hosted_n += 1;
+        let n = self.hosted_n;
+        self.hosted = Some(Hosted { n, session: None, queue: vec![], dir: dir.clone(), slash: vec![], always: HashSet::new() });
+        self.timeline = panel::Timeline::default();
+        (self.pose, self.pending_reply, self.bubble) = (Pose::Idle, None, None);
+        self.minis.clear();
+        self.shells.clear(); // the terminal's: she isn't following it now
+        let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let _ = std::fs::create_dir_all(&dir);
+            let last = chat::last_session(&dir.to_string_lossy());
+            let (events, wake2) = (tx.clone(), wake.clone());
+            let on_event = move |e| {
+                let _ = events.send(Msg::Stream(n, e));
+                wake2.request_repaint();
+            };
+            let started = session::Session::start(&dir, resume.as_deref(), None, services::config_path_for_session().as_deref(), services::strict(), on_event);
+            let _ = tx.send(Msg::Started(n, started.map_err(|e| e.to_string()), last));
+            wake.request_repaint();
+        });
+    }
+
+    /// Ends the hosted session (it's saved and can be resumed) and stores a summary of it in her memory.
+    fn end_session(&mut self, t: f64) {
+        let Some(h) = self.hosted.take() else { return };
+        let dir = h.dir.to_string_lossy().into_owned();
+        h.session.map(session::Session::end); // saved, so it can be resumed
+        let turns: Vec<(String, String)> = self.timeline.turns.iter().filter(|x| !x.prompt.is_empty() || !x.reply.is_empty()).map(|x| (x.prompt.clone(), x.reply.clone())).collect();
+        let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
+        chat::summarize_session(&dir, &turns, move |_| {
+            let _ = tx.send(Msg::Summarized);
+            wake.request_repaint();
+        });
+        self.timeline.pending.clear();
+        self.minis.clear();
+        (self.pending_reply, self.asking_quit) = (None, false);
+        self.settle(t);
+        load_past(self.outbox.clone(), self.ctx.clone()); // it's now a saved session too
+    }
+
+    /// Asks for a folder (on a worker: the dialog blocks), then starts a session there.
+    fn pick_folder(&mut self, t: f64) {
+        self.say(i18n::ui().pick_folder.into(), None, t);
+        let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::Picked(rfd::FileDialog::new().pick_folder()));
+            wake.request_repaint();
+        });
+    }
+
+    /// Answers a permission request (`p`, or the first one waiting). "Always" also covers that tool's other requests.
+    fn answer(&mut self, p: Option<panel::Permission>, allow: bool, always: bool) {
+        let Some(h) = self.hosted.as_mut() else { return };
+        let Some(p) = p.or_else(|| self.timeline.pending.first().cloned()) else { return };
+        let Some(s) = h.session.as_mut() else { return };
+        if always {
+            h.always.insert(p.tool.clone());
+        }
+        let _ = if allow { s.allow(&p.request_id, &p.input) } else { s.deny(&p.request_id, "The user denied this.") };
+        self.timeline.pending.retain(|q| q.request_id != p.request_id);
+        for q in self.timeline.pending.iter().filter(|q| h.always.contains(&q.tool)) {
+            let _ = s.allow(&q.request_id, &q.input);
+        }
+        self.timeline.pending.retain(|q| !h.always.contains(&q.tool));
+        if self.timeline.pending.is_empty() && self.pose == Pose::Waiting {
+            (self.pose, self.bubble) = (Pose::Working, None);
+        }
+    }
+
+    /// Her summary of the session's recent turns, in her voice, into her bubble.
+    fn summarize(&mut self, t: f64) {
+        let turns = &self.timeline.turns;
+        let recent: Vec<String> = turns[turns.len().saturating_sub(5)..].iter().map(|x| format!("User: {}\nClaude: {}", log::clean(&x.prompt, 300), log::clean(&x.reply, 600))).collect();
+        if recent.is_empty() {
+            return self.say(i18n::ui().nothing_to_sum.into(), None, t);
+        }
+        self.chat_pending = true;
+        self.label(i18n::ui().chat_thinking.into(), t);
+        let system = format!("{}\nThe message is the user's latest requests to Claude Code and its replies: sum up what Claude did and what's left, instead of rewriting it line by line.", rewrite::persona());
+        let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let partial = |short: &str| {
+                let _ = tx.send(Msg::Partial { reply: None, short: short.to_string() });
+                wake.request_repaint();
+            };
+            let answer = rewrite::ask_stream(&system, &recent.join("\n\n"), rewrite::short_part(partial)).and_then(|o| rewrite::split(&o));
+            let _ = tx.send(Msg::Chat(answer));
+            wake.request_repaint();
+        });
+    }
+
+    /// Quits; with Claude mid-turn in a hosted session she asks first. An ended session's summary is stored before she goes.
+    fn quit(&mut self, t: f64) {
+        let busy = self.hosted.is_some() && self.timeline.turns.last().is_some_and(|x| !x.done);
+        if busy && !self.asking_quit {
+            self.asking_quit = true;
+            (self.game, self.sudoku, self.picking, self.game_loading, self.playlist_open) = (None, None, false, false, false);
+            return self.say(i18n::ui().quit_ask.into(), None, t + 600.0);
+        }
+        if self.hosted.is_none() {
+            return self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+        }
+        self.end_session(t);
+        (self.popup, self.panel) = (None, None);
+        self.quit_at = Some(t + QUIT_WAIT);
+        self.hidden_until = t + QUIT_WAIT; // gone at once; the summary finishes in the background
+    }
+
+    /// An event from the hosted session: drives her the way the log does for terminal sessions (`apply`).
+    fn on_stream(&mut self, ev: stream::Event, t: f64) {
+        use stream::Event as S;
+        let Some(h) = self.hosted.as_mut() else { return };
+        if let S::Permission { request_id, tool, input, .. } = &ev
+            && h.always.contains(tool)
+        {
+            if let Some(s) = h.session.as_mut() {
+                let _ = s.allow(request_id, input);
+            }
+            return;
+        }
+        self.timeline.push(&ev);
+        match ev {
+            S::Init { slash_commands, .. } => {
+                h.slash = slash_commands;
+                if self.pose == Pose::Idle {
+                    self.pose = Pose::Working; // a turn starts by itself, e.g. a background helper finished
+                }
+            }
+            S::Text(text) => {
+                let note = log::clean(&text, 80);
+                if !note.is_empty() {
+                    self.apply(Event::Note(note), t);
+                }
+            }
+            S::Tool { label, work, .. } => self.apply(Event::Tool(label, work), t),
+            S::AgentStart { id, label } => self.apply(Event::AgentStart { id, label }, t),
+            S::ToolDone { id, is_error, refused, .. } => {
+                if is_error && !refused {
+                    self.apply(Event::Failed, t);
+                }
+                self.apply(Event::AgentDone(id), t);
+            }
+            S::AgentDone(id) => self.apply(Event::AgentDone(id), t),
+            S::Compact => self.apply(Event::Compact, t),
+            S::Permission { tool, input, .. } => {
+                (self.tour, self.playlist_open) = (None, false);
+                if self.pose != Pose::Waiting {
+                    self.waiting_line = self.pick(i18n::lines().waiting);
+                    voice::say(self.waiting_line, voice::Mode::Attention); // out loud, always: Claude needs you
+                }
+                (self.pose, self.waiting_since) = (Pose::Waiting, t);
+                let what = ["command", "file_path", "url", "query", "pattern"].iter().find_map(|k| input[*k].as_str()).map(|s| log::clean(s, 60)).unwrap_or_default();
+                let asks = i18n::ui().asks.replace("{tool}", &tool);
+                self.say(format!("{}\n{asks} {what}", self.waiting_line), None, t + 600.0);
+            }
+            S::Result { text, interrupted, .. } => {
+                if !interrupted && !text.trim().is_empty() {
+                    self.reply_turn = Some((t, self.timeline.turns.len().saturating_sub(1)));
+                    self.apply(Event::Reply(text), t);
+                }
+                self.apply(Event::TurnEnd, t);
+            }
+            S::Exit => {
+                self.end_session(t);
+                self.say(i18n::ui().session_closed.into(), None, t);
+            }
+            S::TextDelta(_) | S::Reset => {}
+        }
+        if !self.timeline.pending.is_empty() {
+            self.pose = Pose::Waiting; // other events don't end a wait for your answer
+        }
+    }
+
     fn handle(&mut self, msg: Msg, t: f64) {
         // A new prompt or a permission request ends the introduction; other activity carries on underneath it.
         if matches!(msg, Msg::Log(_, Event::Prompt)) || matches!(&msg, Msg::Hook(v) if v["hook_event_name"] == "PermissionRequest") {
             self.tour = None;
         }
         let (path, ev) = match msg {
+            Msg::Stream(n, ev) => {
+                if self.hosted.as_ref().is_some_and(|h| h.n == n) {
+                    self.on_stream(ev, t);
+                }
+                return;
+            }
+            Msg::Started(n, started, last) => {
+                // Not the current session any more (ended while starting): dropping it closes it.
+                let Some(h) = self.hosted.as_mut().filter(|h| h.n == n) else { return };
+                let Ok(mut s) = started else {
+                    self.hosted = None;
+                    self.settle(t);
+                    return self.say(i18n::ui().session_failed.into(), None, t);
+                };
+                let greet = h.queue.is_empty(); // you already asked for something: no greeting over Claude's work
+                for q in h.queue.drain(..) {
+                    let _ = s.send(&q);
+                }
+                h.session = Some(s);
+                if greet {
+                    let ui = i18n::ui();
+                    let d = folder_name(&h.dir);
+                    let line = match last {
+                        Some(s) => ui.session_back.replace("{d}", &d).replace("{s}", &s),
+                        None => ui.session_new.replace("{d}", &d),
+                    };
+                    self.say(line, None, t);
+                }
+                return;
+            }
+            Msg::Routed(action) => {
+                self.chat_pending = false;
+                if self.bubble.as_ref().is_some_and(|b| b.is_label) {
+                    self.bubble = None; // "let me think…"
+                }
+                return self.act(action, t);
+            }
+            Msg::Picked(dir) => {
+                if let Some(dir) = dir {
+                    self.start_session(dir, None, t);
+                }
+                return;
+            }
+            Msg::Past(past) => {
+                self.past = past;
+                return;
+            }
+            Msg::Summarized => {
+                if self.quit_at.is_some() {
+                    self.ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Close);
+                }
+                return;
+            }
             Msg::Rewritten { short, long, at } => {
+                if let Some((when, turn)) = self.reply_turn
+                    && when == at
+                {
+                    self.timeline.set_summary(turn, &short); // the panel's card gets her short version too
+                }
                 // Only the rewrite of the reply still waiting: not one that timed out, or an older reply's slow one.
                 if self.pending_reply.as_ref().is_some_and(|p| p.1 == at) {
                     self.pending_reply = None;
@@ -966,7 +1370,11 @@ impl App {
             }
             Msg::Hook(v) => {
                 if v["quit"] == true {
+                    self.end_session(t); // install waits under a second: no time for its summary
                     self.ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+                if self.hosted.is_some() {
+                    return; // she shows her own session; the terminal's wait
                 }
                 // PermissionRequest fires the moment the dialog shows. The permission_prompt Notification only
                 // comes after ~6s without typing; it still covers sandbox network prompts, which have no PermissionRequest.
@@ -1003,6 +1411,7 @@ impl App {
                 }
                 return;
             }
+            Msg::Log(_, _) if self.hosted.is_some() => return,
             Msg::Log(path, ev) => (path, ev),
         };
         if ev == Event::Prompt {
@@ -1113,6 +1522,7 @@ impl eframe::App for App {
         storage.set_string(MUSIC_MODE_KEY, self.music_mode.label().to_string());
         storage.set_string(PLAYLIST_KEY, self.playlist_name.clone());
         storage.set_string(LANG_KEY, self.lang.code().to_string());
+        storage.set_string(MIC_KEY, self.mic_on.to_string());
     }
 
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
@@ -1124,6 +1534,9 @@ impl eframe::App for App {
         let t = self.start.elapsed().as_secs_f64(); // f64: an f32 count of seconds goes coarse after a few days of uptime
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg, t);
+        }
+        if self.quit_at.is_some_and(|q| t > q) {
+            ctx.send_viewport_cmd(ViewportCommand::Close); // the summary took too long
         }
         if let Some((text, since)) = &self.pending_reply
             && t - since > REWRITE_TIMEOUT
@@ -1289,6 +1702,7 @@ impl eframe::App for App {
         let feet = pos2(area.center().x, area.bottom() - MARGIN / 2.0);
         let aspect = self.sprites[0].open.aspect_ratio(); // poses share idle's canvas
         let body = Rect::from_min_max(pos2(feet.x - HEIGHT * aspect / 2.0, feet.y - HEIGHT), pos2(feet.x + HEIGHT * aspect / 2.0, feet.y));
+        self.body = body;
 
         // Clicks pass through everything except her and her bubbles. The cursor is read from the OS
         // because a pass-through window gets no mouse events to tell us when to switch back.
@@ -1369,9 +1783,16 @@ impl eframe::App for App {
             self.popup = None;
         }
         if resp.secondary_clicked() {
-            self.popup = if self.popup.is_some() { None } else { self.open_popup(body, t) };
+            self.popup = if self.popup.is_some() { None } else { self.open_popup(t) };
         }
         self.show_popup(&ctx, t);
+        match self.panel.as_mut().and_then(|p| panel::show(&ctx, p, &self.timeline, &mut self.graph)) {
+            Some(panel::PanelAction::Close) => self.panel = None,
+            Some(panel::PanelAction::Allow(p)) => self.answer(Some(p), true, false),
+            Some(panel::PanelAction::Deny(p)) => self.answer(Some(p), false, false),
+            Some(panel::PanelAction::Always(p)) => self.answer(Some(p), true, true),
+            Some(panel::PanelAction::ServicesChanged) | None => {} // mcp.json applies to the next session
+        }
         let text = i18n::ui();
 
         let painter = ui.painter();
@@ -1722,6 +2143,32 @@ impl eframe::App for App {
             list_shown = true;
         }
 
+        // Buttons under her bubble: Claude asking for permission, or whether to quit mid-turn.
+        let buttons: Vec<(&str, usize)> = if self.asking_quit {
+            vec![(text.yes, 0), (text.no, 1)]
+        } else if self.hosted.is_some() && !self.timeline.pending.is_empty() {
+            vec![(text.allow, 2), (text.deny, 3), (text.always, 4)]
+        } else {
+            vec![]
+        };
+        let mut pressed = None;
+        if !list_shown && !buttons.is_empty() {
+            let w = buttons.len() as f32 * 76.0 - 6.0;
+            for (i, (label, id)) in buttons.into_iter().enumerate() {
+                let r = Rect::from_min_size(pos2(anchor.x - w / 2.0 + i as f32 * 76.0, anchor.y - 26.0), vec2(70.0, 22.0));
+                let resp = ui.interact(r, ui.scope_id().with(("bubble-button", id)), Sense::click());
+                painter.rect(r, 8.0, CREAM, Stroke::new(1.5, CORAL), egui::StrokeKind::Inside);
+                if resp.hovered() {
+                    painter.rect_filled(r, 8.0, CORAL.gamma_multiply(0.25));
+                }
+                painter.text(r.center(), egui::Align2::CENTER_CENTER, label, FontId::proportional(12.5), INK);
+                self.hit_rects.push(r);
+                if resp.clicked() {
+                    pressed = Some(id);
+                }
+            }
+            anchor.y -= 38.0;
+        }
         let mut toggle = false;
         if !list_shown && let Some(b) = tour_line.as_ref().or(self.bubble.as_ref()) {
             let (text, font, color) = match (&b.long, b.expanded, b.is_label) {
@@ -1733,9 +2180,19 @@ impl eframe::App for App {
             // shortcut: text taller than BUBBLE_ROOM clips at the top of the window
             let rect = draw_box(painter, &text, font, color, WIDTH - 40.0, anchor, true);
             self.hit_rects.push(rect);
-            toggle = tour_line.is_none() && !b.is_label && b.long.is_some() && ui.interact(rect, ui.scope_id().with("bubble"), Sense::click()).clicked();
+            // With a hosted session, any bubble opens the panel; otherwise a long one expands.
+            let clickable = self.hosted.is_some() || (!b.is_label && b.long.is_some());
+            toggle = tour_line.is_none() && clickable && ui.interact(rect, ui.scope_id().with("bubble"), Sense::click()).clicked();
         }
-        if toggle && let Some(b) = &mut self.bubble {
+        match pressed {
+            Some(0) => self.quit(now),
+            Some(1) => (self.asking_quit, self.bubble) = (false, None),
+            Some(id) => self.answer(None, id != 3, id == 4),
+            None => {}
+        }
+        if toggle && self.hosted.is_some() {
+            self.open_panel();
+        } else if toggle && let Some(b) = &mut self.bubble {
             b.expanded = !b.expanded;
             b.hide_at = now + 10.0 + b.long.as_deref().unwrap_or("").chars().count() as f64 / 12.0;
         }
@@ -1819,6 +2276,46 @@ fn open_music_folder() {
         let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
         let _ = std::process::Command::new(opener).arg(&dir).spawn();
     });
+}
+
+/// Reads the saved sessions on a worker thread; they arrive as Msg::Past.
+fn load_past(tx: Sender<Msg>, wake: egui::Context) {
+    std::thread::spawn(move || {
+        let _ = tx.send(Msg::Past(log::past_sessions(20)));
+        wake.request_repaint();
+    });
+}
+
+fn folder_name(dir: &Path) -> String {
+    dir.file_name().map_or_else(|| dir.to_string_lossy(), |n| n.to_string_lossy()).into_owned()
+}
+
+/// Her own folder next to the exe: sessions start there when you ask for work with none running.
+fn home_dir() -> PathBuf {
+    std::env::current_exe().ok().and_then(|p| Some(p.parent()?.join("home"))).unwrap_or_else(|| PathBuf::from("home"))
+}
+
+fn loose(s: &str) -> String {
+    i18n::fold(&s.to_lowercase()).chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// Folders sessions ran in whose name matches what you called the project ("my blog" → `blog`).
+fn matching_dirs(past: &[log::Past], hint: Option<&str>) -> Vec<PathBuf> {
+    let Some(hint) = hint.map(loose).filter(|h| !h.is_empty()) else { return vec![] };
+    let mut dirs: Vec<PathBuf> = vec![];
+    for p in past {
+        let name = loose(&folder_name(&p.dir));
+        if name.len() >= 2 && (name.contains(&hint) || hint.contains(&name)) && !dirs.contains(&p.dir) {
+            dirs.push(p.dir.clone());
+        }
+    }
+    dirs
+}
+
+/// A saved session that fits what you said: its folder or its title.
+fn matches_hint(p: &log::Past, hint: &str) -> bool {
+    let h = loose(hint);
+    !h.is_empty() && (matching_dirs(std::slice::from_ref(p), Some(hint)).len() == 1 || loose(&p.title).contains(&h))
 }
 
 fn mmss(secs: f32) -> String {
@@ -1937,4 +2434,20 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("Claudesona", opts, Box::new(|cc| Ok(Box::new(App::new(cc, listener)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_projects_by_folder_name() {
+        let past = |dir: &str, title: &str| log::Past { id: dir.into(), dir: PathBuf::from(dir), title: title.into() };
+        let all = [past("/code/blog", "Fix login"), past("/code/blog", "Dark mode"), past("/code/api-server", "Auth"), past("/code/Đồ án", "Thesis")];
+        assert_eq!(matching_dirs(&all, Some("my blog")), [PathBuf::from("/code/blog")]);
+        assert_eq!(matching_dirs(&all, Some("the API server")), [PathBuf::from("/code/api-server")]);
+        assert_eq!(matching_dirs(&all, Some("do an")), [PathBuf::from("/code/Đồ án")]);
+        assert!(matching_dirs(&all, Some("code")).is_empty() && matching_dirs(&all, None).is_empty());
+        assert!(matches_hint(&all[1], "dark mode") && matches_hint(&all[0], "blog") && !matches_hint(&all[2], "blog"));
+    }
 }

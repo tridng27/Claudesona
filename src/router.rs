@@ -2,7 +2,6 @@
 // a slash command, a summary, a session command or memory. Plain cases are matched in code; the rest is one
 // Haiku call (rewrite::ask, the rewriter's flags) that answers in JSON and also cleans up spoken prompts.
 // The actions are described in SPEC-v2.md (Talking to her).
-#![allow(dead_code)] // wired into the UI by the talking-to-her work, not yet
 use crate::i18n::{fold, Lang};
 use serde_json::Value;
 

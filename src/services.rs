@@ -1,7 +1,6 @@
 // MCP services (SPEC-v2.md, "MCP services"): `mcp.json` next to the exe, in Claude Code's `--mcp-config`
 // shape. Servers that are on sit in `mcpServers`; off ones in `disabledServers`, so they keep their settings.
 // Hosted sessions get `mcp-session.json`, written with only the ones that are on.
-#![allow(dead_code)] // shortcut: main.rs doesn't call this yet; remove once the panel is wired in
 use crate::{CORAL, SOFT_INK, i18n};
 use eframe::egui::{self, RichText};
 use serde_json::{Map, Value, json};

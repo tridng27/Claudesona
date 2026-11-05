@@ -1,6 +1,5 @@
 // The session panel (SPEC-v2.md, "Session panel"): a window beside her with one card per turn, its steps
 // as rows that expand to the details, a pending permission pinned on top, and the Memory and Services tabs.
-#![allow(dead_code)] // shortcut: main.rs doesn't open the panel yet; remove once it's wired in
 use crate::log::Work;
 use crate::stream::Event;
 use crate::{CORAL, CREAM, INK, SOFT_INK, i18n, memgraph, services};
