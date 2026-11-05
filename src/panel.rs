@@ -193,7 +193,7 @@ fn icon(s: &Step) -> &'static str {
         (_, Work::Testing) => "🧪",
         (_, Work::Shipping) => "🚀",
         (_, Work::Web) => "🌐",
-        (_, Work::Plain) => "⚙",
+        (_, Work::Plain | Work::Service) => "⚙",
     }
 }
 

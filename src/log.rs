@@ -16,6 +16,7 @@ pub enum Work {
     Testing,  // a shell command that runs tests
     Shipping, // git commit / git push
     Web,      // WebSearch, WebFetch
+    Service,  // an MCP tool (mcp__server__tool): one pose for all of them
 }
 
 #[derive(Debug, PartialEq)]
@@ -128,6 +129,7 @@ pub fn work_kind(name: &str, input: &Value) -> Work {
         "Read" | "Grep" | "Glob" => Work::Reading,
         "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => Work::Editing,
         "WebSearch" | "WebFetch" => Work::Web,
+        n if n.starts_with("mcp__") => Work::Service,
         "Bash" | "PowerShell" => {
             let cmd = input["command"].as_str().unwrap_or("");
             let c = words(cmd);
@@ -158,8 +160,21 @@ pub fn tool_label(name: &str, input: &Value) -> String {
         ("Grep" | "Glob", _) => ui.searching.into(),
         ("Agent" | "Task", _) => ui.helper.into(),
         ("WebSearch" | "WebFetch", _) => ui.online.into(),
-        _ => ui.using.replace("{name}", name),
+        _ => ui.using.replace("{name}", &name.strip_prefix("mcp__").map_or(name.to_string(), server_name)),
     }
+}
+
+/// "Google Calendar" from an MCP tool's `server__tool` part ("google_calendar__list_events"). claude.ai connectors
+/// ("claude_ai_Gmail") and plugin servers ("plugin_design_figma") lose their prefix.
+fn server_name(tool: &str) -> String {
+    let server = tool.split("__").next().unwrap_or(tool);
+    let plugin = server.strip_prefix("plugin_").and_then(|p| p.split_once('_')).map(|(_, s)| s);
+    let server = server.strip_prefix("claude_ai_").or(plugin).unwrap_or(server);
+    let words = server.split(['_', '-']).filter(|w| !w.is_empty()).map(|w| {
+        let mut c = w.chars();
+        c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+    });
+    words.collect::<Vec<_>>().join(" ")
 }
 
 /// The command lowercased and padded, with separators as spaces, so " word " matches whole words.
@@ -391,6 +406,11 @@ mod tests {
         assert_eq!(kind("WebSearch", r#"{"query":"x"}"#), Work::Web);
         assert_eq!(kind("WebFetch", r#"{"url":"https://x"}"#), Work::Web);
         assert_eq!(kind("Agent", r#"{"description":"x"}"#), Work::Plain);
+        assert_eq!(kind("mcp__gmail__search_threads", "{}"), Work::Service);
+        assert_eq!(server_name("google_calendar__list_events"), "Google Calendar");
+        assert_eq!(server_name("claude_ai_Gmail__search"), "Gmail");
+        assert_eq!(server_name("plugin_design_figma__get"), "Figma");
+        assert_eq!(server_name("my-server__x"), "My Server");
         assert_eq!(kind("PowerShell", r#"{"command":"cargo test log::"}"#), Work::Testing);
         assert_eq!(sh("cd /c/x && cargo test log::"), Work::Testing);
         assert_eq!(sh("npx vitest run"), Work::Testing);

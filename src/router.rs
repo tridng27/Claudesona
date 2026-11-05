@@ -116,7 +116,8 @@ fn forced_prompt(text: &str) -> Option<&str> {
 }
 
 fn slash(command: String, args: String, ctx: &RouteCtx) -> Action {
-    if ctx.slash_commands.iter().any(|c| c.trim_start_matches('/') == command) {
+    // No init line yet (or no session): the list is unknown, so send it and let Claude Code answer.
+    if ctx.slash_commands.is_empty() || ctx.slash_commands.iter().any(|c| c.trim_start_matches('/') == command) {
         Action::Slash { command, args }
     } else {
         Action::Say(crate::i18n::cant_slash(ctx.language, &command))
@@ -200,6 +201,7 @@ mod tests {
         assert_eq!(fast("/compact keep the tests", &ctx(), false), Some(Action::Slash { command: "compact".into(), args: "keep the tests".into() }));
         assert_eq!(fast("/clear", &ctx(), false), Some(Action::Slash { command: "clear".into(), args: "".into() }));
         assert!(matches!(fast("/help", &ctx(), false), Some(Action::Say(s)) if s.contains("/help")));
+        assert_eq!(fast("/help", &RouteCtx::default(), false), Some(Action::Slash { command: "help".into(), args: "".into() })); // before the init line
         assert_eq!(fast("/resume blog", &ctx(), false), Some(Action::Session(SessionCmd::Resume { hint: Some("blog".into()) })));
     }
 

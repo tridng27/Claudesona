@@ -1,7 +1,6 @@
 // Talking to her: microphone → loudness gate → Whisper → wake word. See SPEC-v2.md, "Talking to her".
 // Whisper `small` runs on the CPU through candle (pure Rust, so every target builds without a C toolchain).
 // The model is downloaded into model/whisper-small/ next to the exe on first use; until then STT is off.
-#![allow(dead_code)] // wired into the UI later
 
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{LayerNorm, Module, VarBuilder};
@@ -42,6 +41,10 @@ impl Handle {
     /// Off while she's asleep, hidden or speaking (so she doesn't hear herself).
     pub fn set_listening(&self, on: bool) {
         self.listening.store(on, Ordering::Relaxed);
+    }
+    /// The model is loaded, so the mic can open.
+    pub fn ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
     }
     /// Mouse held on her: record regardless of the wake word, transcribe on release.
     pub fn push_to_talk(&self, held: bool) {
