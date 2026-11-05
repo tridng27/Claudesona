@@ -1239,6 +1239,9 @@ impl App {
             return;
         }
         self.timeline.push(&ev);
+        if matches!(&ev, S::Tool { parent: Some(_), .. } | S::ToolDone { parent: Some(_), .. }) {
+            return; // a helper's own steps only show in the panel; the mini stands for the helper
+        }
         match ev {
             S::Init { slash_commands, .. } => {
                 h.slash = slash_commands;

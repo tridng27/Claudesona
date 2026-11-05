@@ -43,7 +43,7 @@ impl Session {
         let stdout = child.stdout.take().ok_or(io::ErrorKind::BrokenPipe)?;
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
-                stream::parse_line(&String::from_utf8_lossy(&line)).into_iter().for_each(&mut on_event);
+                stream::parse_line_all(&String::from_utf8_lossy(&line)).into_iter().for_each(&mut on_event);
             }
             on_event(Event::Exit);
         });

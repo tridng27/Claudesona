@@ -27,7 +27,8 @@ pub enum Event {
 
 const OUTPUT_MAX: usize = 20_000; // characters of a tool result kept for the panel
 
-/// Top-level events only: a helper's own steps don't drive her (the mini shows the helper as a whole).
+/// Top-level events only (tests; the app filters helper steps itself in `on_stream`).
+#[cfg(test)]
 pub fn parse_line(line: &str) -> Vec<Event> {
     parse_line_all(line).into_iter().filter(|e| !matches!(e, Event::Tool { parent: Some(_), .. } | Event::ToolDone { parent: Some(_), .. })).collect()
 }
