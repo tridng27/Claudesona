@@ -1,6 +1,5 @@
 // A hosted Claude Code session: one `claude -p` process in stream-json mode (SPEC-v2.md, Hosted sessions).
 // No UI here: events go to a callback on the reader thread; the format itself lives in src/stream.rs.
-#![allow(dead_code)] // shortcut: nothing calls this yet; remove once the session panel uses it
 use crate::stream::{self, Event};
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Write};
@@ -16,15 +15,18 @@ pub struct Session {
 
 impl Session {
     /// Starts `claude` in `dir` and a reader thread that calls `on_event` for each event, then Exit.
-    /// Permission prompts come as Event::Permission (`--permission-prompt-tool stdio`), unless
-    /// `mcp_config` is given: then her MCP server's `approve` tool answers them.
-    pub fn start(dir: &Path, resume: Option<&str>, model: Option<&str>, mcp_config: Option<&Path>, mut on_event: impl FnMut(Event) + Send + 'static) -> io::Result<Session> {
+    /// Permission prompts come as Event::Permission (`--permission-prompt-tool stdio`). `mcp_config` is her
+    /// services file (`--mcp-config`); `strict_mcp` leaves out your own MCP servers (`--strict-mcp-config`).
+    pub fn start(dir: &Path, resume: Option<&str>, model: Option<&str>, mcp_config: Option<&Path>, strict_mcp: bool, mut on_event: impl FnMut(Event) + Send + 'static) -> io::Result<Session> {
         let mut cmd = Command::new("claude");
         cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
-        match mcp_config {
-            Some(cfg) => cmd.args(["--permission-prompt-tool", "mcp__claudesona__approve", "--mcp-config"]).arg(cfg),
-            None => cmd.args(["--permission-prompt-tool", "stdio"]),
-        };
+        cmd.args(["--permission-prompt-tool", "stdio"]);
+        if let Some(cfg) = mcp_config {
+            cmd.arg("--mcp-config").arg(cfg);
+        }
+        if strict_mcp {
+            cmd.arg("--strict-mcp-config");
+        }
         if let Some(id) = resume {
             cmd.args(["--resume", id]);
         }
@@ -109,7 +111,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.txt"), "The secret word is kiwi.\n").unwrap();
         let (tx, rx) = channel();
-        let mut s = Session::start(&dir, None, Some("haiku"), None, move |e| {
+        let mut s = Session::start(&dir, None, Some("haiku"), None, false, move |e| {
             let _ = tx.send(e);
         })
         .unwrap();
