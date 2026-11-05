@@ -4,3 +4,5 @@ SPEC.md
 # ElevenLabs key she saves next to the exe: never commit it
 voice_key.txt
 **/voice_key.txt
+SPEC-v2.md
+.claude/worktrees/
