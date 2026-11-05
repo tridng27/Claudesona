@@ -11,6 +11,7 @@ mod log;
 mod memgraph;
 mod music;
 mod rewrite;
+mod router;
 mod session;
 mod stream;
 mod voice;
