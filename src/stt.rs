@@ -20,9 +20,10 @@ const PREROLL: usize = 10; // quiet frames kept before speech, so the first syll
 const HANGOVER: usize = 20; // 600ms of quiet ends an utterance
 const MIN_VOICED: usize = 8; // fewer loud frames than this (240ms) was a click or a cough
 const MAX_FRAMES: usize = 500; // cut at 15s
-const MIN_RMS: f32 = 0.01; // -40 dBFS: quieter than this is never speech
+const MIN_RMS: f32 = 0.002; // -54 dBFS: quieter than this is never speech (a DGM20 USB mic's speech sits at 0.005-0.03)
 const FOLLOW_UP: Duration = Duration::from_secs(6); // after a bare "Claudesona", the next sentence is a command
 const MAX_TOKENS: usize = 120;
+const HINT: &str = " Claudesona, Claudesona ơi."; // Whisper's "previous text": teaches it her name in EN and VI
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Heard {
@@ -517,6 +518,7 @@ struct Stt {
     no_timestamps: u32,
     no_speech: u32,
     langs: [u32; 2],
+    hint: Vec<u32>, // <|startofprev|> + her name: Whisper otherwise hears "Persona", "close owner"…
 }
 
 impl Stt {
@@ -538,6 +540,7 @@ impl Stt {
             no_timestamps: id(whisper::NO_TIMESTAMPS_TOKEN)?,
             no_speech: whisper::NO_SPEECH_TOKENS.iter().find_map(|t| tok.token_to_id(t)).ok_or("tokenizer has no no-speech token")?,
             langs: [id("<|en|>")?, id("<|vi|>")?],
+            hint: std::iter::once(id("<|startofprev|>")?).chain(tok.encode(HINT, false).map_err(|e| e.to_string())?.get_ids().iter().copied()).collect(),
             tok,
         })
     }
@@ -557,6 +560,9 @@ impl Stt {
         let mel = Tensor::from_vec(mel, (1, n_mels, frames), &Device::Cpu)?.narrow(2, 0, keep)?;
         let audio = self.encoder.forward(&mel, true)?.squeeze(0)?;
         self.decoder.reset();
+        for &t in &self.hint {
+            self.decoder.step(t, &audio)?;
+        }
 
         // First step: is it speech at all, and which language (English or Vietnamese)?
         let first = self.decoder.step(self.sot, &audio)?;
@@ -570,7 +576,9 @@ impl Stt {
             logits = self.decoder.step(t, &audio)?;
         }
         let mut text = Vec::new();
-        for _ in 0..MAX_TOKENS {
+        // Nobody says more than ~12 tokens a second; a longer answer is Whisper looping ("Persona? Persona? …").
+        let max = (pcm.len() * 12 / RATE as usize + 8).min(MAX_TOKENS);
+        for _ in 0..max {
             for &s in &self.config.suppress_tokens {
                 if let Some(l) = logits.get_mut(s as usize) {
                     *l = f32::NEG_INFINITY;
@@ -586,8 +594,14 @@ impl Stt {
         }
         let text = self.tok.decode(&text, true).map_err(candle_core::Error::msg)?;
         let text = text.trim();
-        Ok((!text.is_empty()).then(|| text.to_string()))
+        Ok((!text.is_empty() && !looping(text)).then(|| text.to_string()))
     }
+}
+
+/// Whisper's stuck-record failure on noise: the same sentence three or more times in a row.
+fn looping(text: &str) -> bool {
+    let parts: Vec<String> = text.split(['.', '?', '!']).map(clean).filter(|s| !s.is_empty()).collect();
+    parts.windows(3).any(|w| w[0] == w[1] && w[1] == w[2])
 }
 
 fn softmax_at(logits: &[f32], i: usize) -> f32 {
@@ -735,6 +749,42 @@ mod tests {
         // Known values from librosa.filters.mel(sr=16000, n_fft=400, n_mels=80).
         assert!((f[1] - 0.02486259).abs() < 1e-6, "{}", f[1]);
         assert!((f[40 * 201 + 43] - 0.014735566).abs() < 1e-6, "{}", f[40 * 201 + 43]); // log part of the scale
+    }
+
+    #[test]
+    fn drops_stuck_records() {
+        assert!(looping("Wasanite. Wasanite. Wasanite. Was"));
+        assert!(looping("Mày ra rồi. Mày ra rồi. Mày ra rồi."));
+        assert!(!looping("Claudesona. What time is it?"));
+        assert!(!looping("No. No. Okay, do it."));
+    }
+
+    /// Live mic check: `cargo test --release stt::tests::mic -- --ignored --nocapture` (SECS=60), then talk.
+    #[test]
+    #[ignore]
+    fn mic() {
+        let dev = cpal::default_host().default_input_device().expect("no input device");
+        println!("device: {:?} {:?}", dev.description().map(|d| d.name().to_string()), dev.default_input_config());
+        let dir = std::env::var("WHISPER_DIR").map(PathBuf::from).unwrap_or_else(|_| folder());
+        let mut stt = Stt::load(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _s = open_mic(tx).unwrap();
+        let secs: u64 = std::env::var("SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+        println!("listening {secs}s: talk now");
+        let (mut gate, end, mut peak, mut tick) = (Gate::default(), Instant::now() + Duration::from_secs(secs), 0f32, Instant::now());
+        while Instant::now() < end {
+            let Ok(chunk) = rx.recv_timeout(Duration::from_millis(500)) else { println!("no audio arriving"); continue };
+            let rms = (chunk.iter().map(|x| x * x).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
+            peak = peak.max(rms);
+            if tick.elapsed() > Duration::from_secs(1) {
+                println!("loudest {peak:.4}  noise floor {:.4}  threshold {:.4}  talking {}", gate.noise, (gate.noise * 3.0).max(MIN_RMS), gate.talking);
+                (peak, tick) = (0.0, Instant::now());
+            }
+            for utt in gate.push(&chunk) {
+                let text = stt.transcribe(&utt);
+                println!(">> {:.1}s: {text:?} wake: {:?}", utt.len() as f32 / 16000.0, text.as_deref().and_then(after_wake));
+            }
+        }
     }
 
     /// Latency on real speech: `WHISPER_DIR=<folder with the 3 model files> cargo test --release stt::tests::latency -- --ignored --nocapture`
