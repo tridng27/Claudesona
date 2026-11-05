@@ -14,6 +14,7 @@ rodio = { version = "0.23", default-features = false, features = ["playback", "f
 candle-core = "0.11"         # Whisper speech to text on the CPU, pure Rust (whisper.cpp needs a C toolchain per target)
 candle-nn = "0.11"
 candle-transformers = "0.11"
+rfd = "0.17.2"               # folder picker for new sessions
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Console", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

@@ -1,7 +1,6 @@
 // Everything that knows the stream-json format of a hosted `claude -p` session lives here, the way
 // src/log.rs holds the session-log format. Unversioned too: when an update breaks parsing, add the new
 // line shape to tests/fixtures/stream first. Checked against Claude Code 2.1.318.
-#![allow(dead_code)] // shortcut: nothing calls this yet; remove once hosted sessions are wired into the app
 use crate::log::{Work, clean, tool_label, work_kind};
 use serde_json::{Value, json};
 

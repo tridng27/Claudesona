@@ -122,6 +122,20 @@ pub struct Ui {
     pub svc_empty: &'static str,
     pub svc_next: &'static str,
     pub svc_broken: &'static str,
+    pub new_session: &'static str,
+    pub recent_sessions: &'static str,
+    pub no_sessions: &'static str,
+    pub open_panel: &'static str,
+    pub microphone: &'static str,
+    pub yes: &'static str,
+    pub no: &'static str,
+    pub quit_ask: &'static str,
+    pub pick_folder: &'static str,
+    pub session_new: &'static str,
+    pub session_back: &'static str,
+    pub session_failed: &'static str,
+    pub session_closed: &'static str,
+    pub nothing_to_sum: &'static str,
 }
 
 const EN_UI: Ui = Ui {
@@ -213,6 +227,20 @@ const EN_UI: Ui = Ui {
     svc_empty: "No services yet. Add an MCP server by its command or URL.",
     svc_next: "Changes apply to the next session.",
     svc_broken: "mcp.json couldn't be read, so I won't change it: {e}",
+    new_session: "New session",
+    recent_sessions: "Recent sessions",
+    no_sessions: "No saved sessions yet",
+    open_panel: "Open panel",
+    microphone: "Microphone",
+    yes: "Yes",
+    no: "No",
+    quit_ask: "Claude's still working~ stop it? (・ω・)",
+    pick_folder: "Which folder should we work in?~ (・ω・)",
+    session_new: "New session in {d}~ What should we make? (｀・ω・´)",
+    session_back: "Back in {d}~ Last time: {s}",
+    session_failed: "Your sidekick couldn't start Claude… is it installed? (・ω・)",
+    session_closed: "Session closed~ It's saved, so we can pick it up later! (^▽^)",
+    nothing_to_sum: "Nothing to sum up yet~ Ask Claude something first! (・ω・)",
 };
 
 const VI_UI: Ui = Ui {
@@ -304,6 +332,20 @@ const VI_UI: Ui = Ui {
     svc_empty: "Chưa có dịch vụ nào. Thêm một MCP server bằng lệnh hoặc URL nha.",
     svc_next: "Thay đổi có hiệu lực ở phiên sau.",
     svc_broken: "Không đọc được mcp.json nên tớ sẽ không sửa nó: {e}",
+    new_session: "Phiên mới",
+    recent_sessions: "Phiên gần đây",
+    no_sessions: "Chưa có phiên nào được lưu",
+    open_panel: "Mở bảng phiên",
+    microphone: "Micro",
+    yes: "Có",
+    no: "Không",
+    quit_ask: "Claude vẫn đang làm việc~ dừng lại nha? (・ω・)",
+    pick_folder: "Mình làm việc ở thư mục nào nè?~ (・ω・)",
+    session_new: "Phiên mới ở {d} nè~ Mình làm gì đây? (｀・ω・´)",
+    session_back: "Quay lại {d} rồi~ Lần trước: {s}",
+    session_failed: "Tớ không mở được Claude… cậu cài nó chưa? (・ω・)",
+    session_closed: "Đóng phiên rồi~ Đã lưu lại, lần sau làm tiếp nha! (^▽^)",
+    nothing_to_sum: "Chưa có gì để tóm tắt~ Nhờ Claude làm gì đó trước nha! (・ω・)",
 };
 
 pub fn ui() -> &'static Ui {

@@ -259,6 +259,47 @@ fn len(p: &PathBuf) -> u64 {
     std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
 }
 
+/// A saved session, for resuming it and for knowing the folders sessions ran in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Past {
+    pub id: String,
+    pub dir: PathBuf,  // the folder it ran in
+    pub title: String, // Claude Code's title for it, else your first prompt
+}
+
+/// Saved sessions, newest first: the `max` newest, plus the newest of every project folder (so every folder
+/// sessions ran in is known). Reads files: call from a worker thread.
+pub fn past_sessions(max: usize) -> Vec<Past> {
+    let root = crate::cli::home().join(".claude").join("projects");
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = logs(&root).into_iter().filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut folders = std::collections::HashSet::new();
+    files
+        .into_iter()
+        .enumerate()
+        .filter(|(i, (_, p))| folders.insert(p.parent().map(PathBuf::from)) || *i < max)
+        .filter_map(|(_, (_, p))| {
+            let mut head = Vec::new();
+            // shortcut: the first 512KB; a title written later than that falls back to the first prompt.
+            File::open(&p).ok()?.take(512 * 1024).read_to_end(&mut head).ok()?;
+            let (dir, title) = session_head(&String::from_utf8_lossy(&head))?;
+            Some(Past { id: p.file_stem()?.to_string_lossy().into_owned(), dir: PathBuf::from(dir), title })
+        })
+        .collect()
+}
+
+/// The folder a session ran in and its title, from the start of its log. None without a folder.
+fn session_head(text: &str) -> Option<(String, String)> {
+    let (mut cwd, mut title, mut prompt) = (None, None, None);
+    for d in text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        cwd = cwd.or_else(|| d["cwd"].as_str().map(String::from));
+        title = d["aiTitle"].as_str().map(String::from).or(title);
+        let typed = d["message"]["content"].as_str().filter(|s| d["type"] == "user" && d["isMeta"] != true && !s.trim_start().starts_with('<'));
+        prompt = prompt.or_else(|| typed.map(|s| clean(s, 60)));
+    }
+    Some((cwd?, title.or(prompt).unwrap_or_default()))
+}
+
 /// Every session log file.
 fn logs(root: &PathBuf) -> Vec<PathBuf> {
     let Ok(dirs) = std::fs::read_dir(root) else { return vec![] };
@@ -396,5 +437,20 @@ mod tests {
     fn clean_drops_code_and_caps_length() {
         assert_eq!(clean("Hi\n```rust\nfn x() {}\n```\n- one\n## Two", 160), "Hi one Two");
         assert!(clean(&"word ".repeat(100), 160).ends_with('…'));
+    }
+
+    #[test]
+    fn session_folder_and_title() {
+        // Shapes from a 2.1.318 log (long fields cut).
+        let log = [
+            r#"{"type":"last-prompt","leafUuid":"171bf5e8","sessionId":"3043b734"}"#,
+            r#"{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>x"},"cwd":"C:\\Claudesona"}"#,
+            r#"{"parentUuid":"171bf5e8","isSidechain":false,"type":"user","message":{"role":"user","content":"Can claudesona interact with a claude session?"},"cwd":"C:\\Claudesona","sessionId":"3043b734","version":"2.1.318"}"#,
+            r#"{"type":"ai-title","aiTitle":"Claudesona interacting with Claude sessions","sessionId":"3043b734"}"#,
+        ]
+        .join("\n");
+        assert_eq!(session_head(&log), Some((r"C:\Claudesona".into(), "Claudesona interacting with Claude sessions".into())));
+        assert_eq!(session_head(&log.replace("ai-title", "x").replace("aiTitle", "x")).unwrap().1, "Can claudesona interact with a claude session?");
+        assert_eq!(session_head(r#"{"type":"mode","mode":"normal"}"#), None);
     }
 }
