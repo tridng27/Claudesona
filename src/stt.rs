@@ -23,6 +23,7 @@ const MAX_FRAMES: usize = 500; // cut at 15s
 const MIN_RMS: f32 = 0.002; // -54 dBFS: quieter than this is never speech (a DGM20 USB mic's speech sits at 0.005-0.03)
 const FOLLOW_UP: Duration = Duration::from_secs(6); // after a bare "Claudesona", the next sentence is a command
 const MAX_TOKENS: usize = 120;
+const PEEK: usize = RATE as usize * 5 / 2; // 2.5s: enough to hear "hey Claudesona" at the start of a clip
 const HINT: &str = " Claudesona, Claudesona ơi."; // Whisper's "previous text": teaches it her name in EN and VI
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,8 +275,12 @@ fn listen(h: &Handle, rx: Receiver<Vec<f32>>, mut on_heard: impl FnMut(Heard)) {
         }
         for utt in gate.push(&chunk) {
             let began = Instant::now() - Duration::from_secs_f32(utt.len() as f32 / RATE as f32);
+            let following = follow_up.is_some_and(|t| began <= t);
+            if !following && !stt.starts_with_name(&utt) {
+                continue; // not for her: skip the full transcription
+            }
             let Some(text) = stt.transcribe(&utt) else { continue };
-            if let Some(heard) = route(&text, follow_up.is_some_and(|t| began <= t)) {
+            if let Some(heard) = route(&text, following) {
                 follow_up = heard.wake_only.then(|| Instant::now() + FOLLOW_UP);
                 on_heard(heard);
             }
@@ -547,10 +552,17 @@ impl Stt {
 
     /// 16 kHz mono in, text out; None for silence, noise or a failure.
     fn transcribe(&mut self, pcm: &[f32]) -> Option<String> {
-        self.run(pcm).map_err(|e| eprintln!("stt: {e}")).ok().flatten()
+        self.run(pcm, MAX_TOKENS).map_err(|e| eprintln!("stt: {e}")).ok().flatten()
     }
 
-    fn run(&mut self, pcm: &[f32]) -> candle_core::Result<Option<String>> {
+    /// Cheap check before a full transcription: does the clip start with her name?
+    /// Only its first 2.5s and a few tokens, so chatter around her costs a fraction of the CPU.
+    fn starts_with_name(&mut self, pcm: &[f32]) -> bool {
+        let head = &pcm[..pcm.len().min(PEEK)];
+        self.run(head, 8).map_err(|e| eprintln!("stt: {e}")).ok().flatten().and_then(|t| after_wake(&t)).is_some()
+    }
+
+    fn run(&mut self, pcm: &[f32], max_tokens: usize) -> candle_core::Result<Option<String>> {
         let n_mels = self.config.num_mel_bins;
         let mel = audio::pcm_to_mel(&self.config, pcm, &self.filters);
         let frames = mel.len() / n_mels;
@@ -577,7 +589,7 @@ impl Stt {
         }
         let mut text = Vec::new();
         // Nobody says more than ~12 tokens a second; a longer answer is Whisper looping ("Persona? Persona? …").
-        let max = (pcm.len() * 12 / RATE as usize + 8).min(MAX_TOKENS);
+        let max = (pcm.len() * 12 / RATE as usize + 8).min(max_tokens);
         for _ in 0..max {
             for &s in &self.config.suppress_tokens {
                 if let Some(l) = logits.get_mut(s as usize) {
@@ -812,7 +824,10 @@ mod tests {
                 let t = Instant::now();
                 let text = stt.transcribe(&pcm);
                 let wake = text.as_deref().and_then(after_wake);
-                println!("{name}: {:.1}s audio → {text:?} (wake: {wake:?}) in {:?}", pcm.len() as f32 / 16000.0, t.elapsed());
+                let full = t.elapsed();
+                let t = Instant::now();
+                let named = stt.starts_with_name(&pcm);
+                println!("{name}: {:.1}s audio → {text:?} (wake: {wake:?}) full {full:?}, name check {:?} ({named})", pcm.len() as f32 / 16000.0, t.elapsed());
             }
         }
     }
