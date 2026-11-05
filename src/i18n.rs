@@ -136,6 +136,7 @@ pub struct Ui {
     pub session_failed: &'static str,
     pub session_closed: &'static str,
     pub nothing_to_sum: &'static str,
+    pub wake_yes: &'static str, // you said just "Claudesona": she turns to you and listens
 }
 
 const EN_UI: Ui = Ui {
@@ -241,6 +242,7 @@ const EN_UI: Ui = Ui {
     session_failed: "Your sidekick couldn't start Claude… is it installed? (・ω・)",
     session_closed: "Session closed~ It's saved, so we can pick it up later! (^▽^)",
     nothing_to_sum: "Nothing to sum up yet~ Ask Claude something first! (・ω・)",
+    wake_yes: "Yes?~ I'm listening! (・ω・)",
 };
 
 const VI_UI: Ui = Ui {
@@ -346,6 +348,7 @@ const VI_UI: Ui = Ui {
     session_failed: "Tớ không mở được Claude… cậu cài nó chưa? (・ω・)",
     session_closed: "Đóng phiên rồi~ Đã lưu lại, lần sau làm tiếp nha! (^▽^)",
     nothing_to_sum: "Chưa có gì để tóm tắt~ Nhờ Claude làm gì đó trước nha! (・ω・)",
+    wake_yes: "Dạ?~ Tớ nghe nè! (・ω・)",
 };
 
 pub fn ui() -> &'static Ui {
@@ -364,6 +367,8 @@ pub struct Lines {
     pub dizzy: &'static [&'static str], // shaken around while you drag her
     pub coffee: &'static [&'static str], // you gave her coffee
     pub waiting: &'static [&'static str],
+    // Her own session needs your OK: no terminal to check. Lines copied from `waiting` keep their recorded voice.
+    pub waiting_hosted: &'static [&'static str],
     pub music: &'static [&'static str],
     pub cheer: &'static [&'static str], // you're typing a prompt
     pub tour: &'static [(Pose, &'static str)],
@@ -441,6 +446,13 @@ const EN_LINES: Lines = Lines {
         "Wait wait~ Claude is asking you something! (⊙_⊙)",
         "Your sidekick needs a yes or no~! (・ω・)",
         "Over heeere~ there's a question for you! ✧",
+    ],
+    waiting_hosted: &[
+        "I need your OK~! (°ロ°)",
+        "Heyyy~ Claude needs your permission! ☆",
+        "Wait wait~ Claude is asking you something! (⊙_⊙)",
+        "Your sidekick needs a yes or no~! (・ω・)",
+        "Just say yes or no~ or tap a button below! (>_<)",
     ],
     music: &[
         "Music time~ Your sidekick picked a nice one for you! ♪",
@@ -620,6 +632,13 @@ const VI_LINES: Lines = Lines {
         "Khoan khoan~ Claude đang hỏi cậu gì đó! (⊙_⊙)",
         "Phụ tá cần cậu trả lời có hay không nè~! (・ω・)",
         "đây nèee~ có câu hỏi cho cậu nè! ✧",
+    ],
+    waiting_hosted: &[
+        "Cậu ơi, tớ cần cậu đồng ý nè~! (°ロ°)",
+        "Cậu ơiii~ Claude đang xin phép cậu kìa! ☆",
+        "Khoan khoan~ Claude đang hỏi cậu gì đó! (⊙_⊙)",
+        "Phụ tá cần cậu trả lời có hay không nè~! (・ω・)",
+        "Cậu nói có hay không là được~ hoặc bấm nút bên dưới nha! (>_<)",
     ],
     music: &[
         "Giờ nghe nhạc nhaa~ Phụ tá chọn cho cậu một bài hay lắm! ♪",
@@ -810,6 +829,7 @@ mod tests {
                 assert!(set.len() >= 3);
             }
             assert!(l.commands.iter().all(|c| c.len() >= 3));
+            assert!(l.waiting_hosted.len() >= 3 && l.waiting_hosted.iter().all(|s| !s.contains("terminal")));
             assert!(l.player_lost.iter().all(|s| s.contains("{w}")));
         }
         assert_eq!(EN_LINES.tour.len(), VI_LINES.tour.len());

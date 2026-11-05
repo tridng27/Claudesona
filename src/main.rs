@@ -71,7 +71,12 @@ const VOICE_KEY: &str = "voice"; // her voice on or off
 const MUSIC_MODE_KEY: &str = "music_mode"; // Loop / Loop 1 / Shuffle
 const PLAYLIST_KEY: &str = "playlist"; // name of the playlist to play
 const LANG_KEY: &str = "lang"; // EN or VI
-const MIC_KEY: &str = "stt_listening"; // the microphone on or off (speech to text is still to come)
+const MIC_KEY: &str = "stt_listening"; // the microphone on or off
+const TALK_HOLD: f64 = 0.3; // seconds holding the mouse still on her before it's push-to-talk rather than a drag
+const SPEECH_TAIL: f64 = 0.3; // the mic stays off this long after her voice stops (room echo)
+const HEARD_SHOWS: f64 = 2.0; // seconds what she heard you say stays under her bubble
+const WAKE_LISTENS: f64 = 6.0; // after a bare "Claudesona" she faces you this long (stt listens as long for the command)
+const PROJECT_FILES: usize = 300; // file names sent to the router to fix misheard ones
 const QUIT_WAIT: f64 = 40.0; // most seconds quitting waits for the ended session's summary
 
 enum Msg {
@@ -87,6 +92,8 @@ enum Msg {
     Chat(Option<(String, Option<String>)>), // her answer to your chat message (None: `claude` failed)
     Partial { reply: Option<f64>, short: String }, // the short answer so far, streaming in (chat: None, or the rewrite of the reply that arrived at that time)
     Hook(serde_json::Value), // from `claudesona hook`, or {"quit":true} from install/uninstall
+    Heard(stt::Heard),       // you talked to her (wake word or push-to-talk)
+    Files(u64, Vec<String>), // the hosted session's project files, relative names
 }
 
 struct Sprite {
@@ -133,6 +140,7 @@ struct Hosted {
     dir: PathBuf,
     slash: Vec<String>,                // slash commands it offers, from its init line
     always: HashSet<String>,           // tools you said "Always" to: she allows them herself until it ends
+    files: Vec<String>,                // relative file names in `dir`, for the router to fix misheard ones
 }
 
 struct Mini {
@@ -360,7 +368,13 @@ struct App {
     panel: Option<panel::PanelState>,
     graph: memgraph::GraphState,
     past: Vec<log::Past>,
-    mic_on: bool,       // remembered; no speech to text yet
+    mic_on: bool,       // remembered
+    stt: Option<stt::Handle>, // started once the mic is first on
+    press_at: Option<f64>,    // the mouse went down on her then and hasn't dragged yet
+    talking: bool,            // push-to-talk: the mouse is held still on her
+    heard: Option<(String, f64)>, // what she heard you say, shown under her bubble until then
+    listen_until: f64,        // you said just "Claudesona": she faces you until then
+    spoke_at: f64,            // her voice was last playing then
     asking_quit: bool,  // "Claude's still working, stop it?" is up with Yes / No
     quit_at: Option<f64>, // quitting once the ended session's summary is stored, or at this time
 }
@@ -523,6 +537,12 @@ impl App {
             graph: memgraph::GraphState::default(),
             past: vec![],
             mic_on: saved(MIC_KEY).is_none_or(|v| v == "true"),
+            stt: None,
+            press_at: None,
+            talking: false,
+            heard: None,
+            listen_until: -99.0,
+            spoke_at: -99.0,
             asking_quit: false,
             quit_at: None,
         }
@@ -972,7 +992,7 @@ impl App {
                 edit.request_focus();
             }
             if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !p.input.trim().is_empty() && !self.chat_pending {
-                self.route_input(p.input.trim().to_string(), t);
+                self.route_input(p.input.trim().to_string(), false, t);
                 close = true;
             }
         });
@@ -1012,7 +1032,7 @@ impl App {
     }
 
     /// Works out what your message is for (router.rs) on a worker thread; `act` does it.
-    fn route_input(&mut self, text: String, t: f64) {
+    fn route_input(&mut self, text: String, spoken: bool, t: f64) {
         self.chat_pending = true;
         self.label(i18n::ui().chat_thinking.into(), t);
         let mut known: Vec<String> = self.past.iter().map(|p| folder_name(&p.dir)).collect();
@@ -1022,11 +1042,11 @@ impl App {
             has_session: self.hosted.is_some(),
             slash_commands: self.hosted.as_ref().map(|h| h.slash.clone()).unwrap_or_default(),
             known_projects: known,
-            project_files: vec![], // only used to fix misheard names in speech
+            project_files: self.hosted.as_ref().map(|h| h.files.clone()).unwrap_or_default(),
             language: self.lang,
         };
         let (tx, wake) = (self.outbox.clone(), self.ctx.clone());
-        router::route(&text, ctx, false, move |a| {
+        router::route(&text, ctx, spoken, move |a| {
             let _ = tx.send(Msg::Routed(a));
             wake.request_repaint();
         });
@@ -1095,7 +1115,12 @@ impl App {
         self.end_session(t);
         self.hosted_n += 1;
         let n = self.hosted_n;
-        self.hosted = Some(Hosted { n, session: None, queue: vec![], dir: dir.clone(), slash: vec![], always: HashSet::new() });
+        self.hosted = Some(Hosted { n, session: None, queue: vec![], dir: dir.clone(), slash: vec![], always: HashSet::new(), files: vec![] });
+        let (tx, wake, root) = (self.outbox.clone(), self.ctx.clone(), dir.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::Files(n, project_files(&root, PROJECT_FILES)));
+            wake.request_repaint();
+        });
         (self.timeline, self.reply_turns) = (panel::Timeline::default(), vec![]);
         (self.pose, self.pending_reply, self.bubble) = (Pose::Idle, None, None);
         self.minis.clear();
@@ -1240,8 +1265,8 @@ impl App {
             S::Permission { tool, input, .. } => {
                 (self.tour, self.playlist_open) = (None, false);
                 if self.pose != Pose::Waiting {
-                    self.waiting_line = self.pick(i18n::lines().waiting);
-                    voice::say(self.waiting_line, voice::Mode::Attention); // out loud, always: Claude needs you
+                    self.waiting_line = self.pick(i18n::lines().waiting_hosted);
+                    voice::say(self.waiting_line, voice::Mode::Attention); // out loud, always, when it's a recorded line
                 }
                 (self.pose, self.waiting_since) = (Pose::Waiting, t);
                 let file = input["file_path"].as_str().map(|p| folder_name(Path::new(p)));
@@ -1309,6 +1334,27 @@ impl App {
                     self.bubble = None; // "let me think…"
                 }
                 return self.act(action, t);
+            }
+            Msg::Heard(h) => {
+                self.quiet_since = t; // you talking to her wakes her
+                if h.wake_only {
+                    self.listen_until = t + WAKE_LISTENS;
+                    self.say(i18n::ui().wake_yes.into(), None, t);
+                    if let Some(b) = &mut self.bubble {
+                        b.hide_at = t + WAKE_LISTENS;
+                    }
+                } else if !h.text.trim().is_empty() {
+                    self.listen_until = -99.0;
+                    self.heard = Some((h.text.clone(), t + HEARD_SHOWS));
+                    self.route_input(h.text, true, t); // at once: the router takes a moment anyway
+                }
+                return;
+            }
+            Msg::Files(n, files) => {
+                if let Some(h) = self.hosted.as_mut().filter(|h| h.n == n) {
+                    h.files = files;
+                }
+                return;
             }
             Msg::Picked(dir) => {
                 if let Some(dir) = dir {
@@ -1550,6 +1596,20 @@ impl eframe::App for App {
         if self.bubble.as_ref().is_some_and(|b| t > b.hide_at) {
             self.bubble = None;
         }
+        if self.heard.as_ref().is_some_and(|h| t > h.1) {
+            self.heard = None;
+        }
+        // Speech to text starts the first time the mic is on (it downloads Whisper then), and stays up after.
+        if self.mic_on && self.stt.is_none() {
+            let (tx, wake) = (self.outbox.clone(), ctx.clone());
+            self.stt = Some(stt::start(move |h| {
+                let _ = tx.send(Msg::Heard(h));
+                wake.request_repaint();
+            }));
+        }
+        if music::speaking() {
+            self.spoke_at = t;
+        }
         // You're typing in the terminal you last prompted from: input arrives while the mouse stays still (Windows only;
         // which key is never read). A few inputs in a row start the cheer, so a lone click doesn't; then any key keeps it going.
         let (input, cursor) = (os::last_input(), os::cursor(1.0));
@@ -1583,6 +1643,9 @@ impl eframe::App for App {
         // Hidden: keep following Claude, but draw nothing and let every click through.
         if t < self.hidden_until {
             self.quiet_since = t; // hiding isn't a quiet stretch: she comes back awake
+            if let Some(s) = &self.stt {
+                s.set_listening(false);
+            }
             if !self.passthrough {
                 self.passthrough = true;
                 ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
@@ -1594,10 +1657,15 @@ impl eframe::App for App {
         let poke_t = self.poke_at.map(|p| t - p).filter(|d| *d < 1.5);
         // The pose to show: music replaces idle, and optionally working; pokes and the tour override.
         // Anything going on keeps her awake; poking or dragging her wakes her.
-        if self.pose != Pose::Idle || cheering || poke_t.is_some() || self.held || self.popup.is_some() || self.playing() || self.tour.is_some() || t < self.coffee_until {
+        if self.pose != Pose::Idle || cheering || poke_t.is_some() || self.held || self.talking || self.popup.is_some() || self.playing() || self.tour.is_some() || t < self.coffee_until {
             self.quiet_since = t;
         }
         let asleep = t - self.quiet_since > SLEEP_AFTER;
+        // The mic listens for her name while she's awake and shown, the checkbox is on, and her own voice isn't playing.
+        let listening = self.mic_on && !asleep && t - self.spoke_at > SPEECH_TAIL;
+        if let Some(s) = &self.stt {
+            s.set_listening(listening);
+        }
         let mut pose = match self.pose {
             Pose::Idle if asleep => Pose::Sleep,
             Pose::Idle if self.music.is_some() => Pose::Music,
@@ -1610,6 +1678,7 @@ impl eframe::App for App {
                 log::Work::Testing => Pose::Testing,
                 log::Work::Shipping => Pose::Shipping,
                 log::Work::Web => Pose::Web,
+                log::Work::Service => Pose::Working, // MCP tools share the working pose (no art of their own)
             },
             p => p,
         };
@@ -1633,6 +1702,9 @@ impl eframe::App for App {
         }
         if poke_t.is_some() {
             pose = Pose::Poke;
+        }
+        if self.talking || t < self.listen_until {
+            pose = Pose::Cheer; // she leans in to hear you (the cheer pose's entry squash)
         }
         let mut tour_line = None; // drawn over her usual bubble, which stays for afterwards
         if let Some((start, said)) = self.tour {
@@ -1730,7 +1802,22 @@ impl eframe::App for App {
         // While held, we move the window ourselves so her hold point stays on the cursor, and swing her from
         // the cursor's movement. Where the OS cursor can't be read (Wayland), the OS drags her instead, without swinging.
         let cursor = os::cursor(native_ppp).map(|(x, y)| pos2(x, y) / ctx.pixels_per_point());
-        if resp.drag_started() {
+        // Push-to-talk: the mouse held still on her for TALK_HOLD. Moving first makes it a drag (egui's drag threshold),
+        // and once she's listening the hold doesn't turn into one (egui calls a long still press a drag too).
+        let was_talking = self.talking;
+        let pressed = resp.is_pointer_button_down_on() && ctx.input(|i| i.pointer.primary_down());
+        self.press_at = if pressed && !self.held { Some(self.press_at.unwrap_or(t)) } else { None };
+        let talk = self.mic_on && self.stt.as_ref().is_some_and(|s| s.ready()) && self.press_at.is_some_and(|p| t - p >= TALK_HOLD);
+        if talk != self.talking {
+            self.talking = talk;
+            if let Some(s) = &self.stt {
+                s.push_to_talk(talk);
+            }
+            if talk {
+                router::prewarm(); // her answer comes sooner
+            }
+        }
+        if resp.drag_started() && !self.talking {
             self.held = true;
             self.swing = Vec2::ZERO;
             self.hold = cursor.map(|c| (c, 0.0, t));
@@ -1769,7 +1856,7 @@ impl eframe::App for App {
         } else {
             self.dizzy = 0.0;
         }
-        if resp.clicked() {
+        if resp.clicked() && !was_talking {
             self.poke_at = Some(t);
             if self.bubble.as_ref().is_none_or(|b| b.is_label) {
                 let line = self.pick(i18n::lines().poke);
@@ -1880,6 +1967,13 @@ impl eframe::App for App {
             // Her voice is charged: sound waves pulse out from both sides of her head until she speaks.
             sound_waves(painter, at(0.86, 0.24), 1.0, t);
             sound_waves(painter, at(0.14, 0.24), -1.0, t);
+        }
+        if self.stt.as_ref().is_some_and(|s| s.ready()) {
+            // A small mic while she listens for her name; a strong, pulsing one while she's taking down what you say.
+            let recording = self.talking || now < self.listen_until;
+            if recording || listening {
+                mic(painter, at(0.12, 0.62), recording, t);
+            }
         }
         if pose == Pose::Working {
             // Two sweat drops, half a cycle apart, each sliding down and fading.
@@ -2170,6 +2264,11 @@ impl eframe::App for App {
             }
             anchor.y -= 38.0;
         }
+        if !list_shown && let Some((said, _)) = &self.heard {
+            // What she heard you say, in a small box under her bubble.
+            let rect = draw_box(painter, &format!("“{}”", clip(said, 120)), FontId::proportional(12.0), SOFT_INK, WIDTH - 80.0, anchor, false);
+            anchor.y = rect.top() - 4.0;
+        }
         let mut toggle = false;
         if !list_shown && let Some(b) = tour_line.as_ref().or(self.bubble.as_ref()) {
             let (text, font, color) = match (&b.long, b.expanded, b.is_label) {
@@ -2204,6 +2303,23 @@ impl eframe::App for App {
 /// How far the popup's entrance has got (0 to 1), eased out so it settles softly.
 fn popup_in(since: f32) -> f32 {
     1.0 - (1.0 - (since / POPUP_IN as f32).clamp(0.0, 1.0)).powi(3)
+}
+
+/// A microphone badge: capsule, cradle and stand on a cream dot. `strong` (recording): full colour and a pulsing ring.
+fn mic(painter: &Painter, c: Pos2, strong: bool, t: f32) {
+    let color = if strong { CORAL } else { CORAL.gamma_multiply(0.55) };
+    if strong {
+        let p = (t * 1.5).fract();
+        painter.circle_stroke(c, 11.0 + p * 8.0, Stroke::new(2.0, CORAL.gamma_multiply(1.0 - p)));
+    }
+    painter.circle(c, 11.0, CREAM.gamma_multiply(if strong { 1.0 } else { 0.8 }), Stroke::new(1.5, color));
+    painter.rect_filled(Rect::from_center_size(c - vec2(0.0, 2.5), vec2(5.0, 9.0)), 2.5, color);
+    let cradle = (0..=8).map(|i| {
+        let a = std::f32::consts::PI * i as f32 / 8.0;
+        c + vec2(-5.0 * a.cos(), 5.0 * a.sin() - 1.0)
+    });
+    painter.add(egui::Shape::line(cradle.collect(), Stroke::new(1.5, color)));
+    painter.line_segment([c + vec2(0.0, 4.0), c + vec2(0.0, 7.0)], Stroke::new(1.5, color));
 }
 
 /// A four-point star: two long strokes, two short diagonals and a bright center.
@@ -2277,6 +2393,30 @@ fn open_music_folder() {
         let opener = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
         let _ = std::process::Command::new(opener).arg(&dir).spawn();
     });
+}
+
+/// Up to `cap` file names under `root`, relative with forward slashes, shallow ones first. Skips build and VCS folders.
+/// Reads the disk: call off the UI thread.
+fn project_files(root: &Path, cap: usize) -> Vec<String> {
+    let mut out = vec![];
+    let mut dirs = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = dirs.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if e.file_type().is_ok_and(|f| f.is_dir()) {
+                if ![".git", "target", "node_modules"].contains(&e.file_name().to_string_lossy().as_ref()) {
+                    dirs.push_back(path);
+                }
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+                if out.len() >= cap {
+                    return out;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Reads the saved sessions on a worker thread; they arrive as Msg::Past.
@@ -2440,6 +2580,22 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_project_files_skipping_build_folders() {
+        let root = std::env::temp_dir().join(format!("claudesona-files-{}", std::process::id()));
+        for d in ["src", ".git", "target/debug", "web/node_modules/x"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in ["Cargo.toml", "src/main.rs", ".git/HEAD", "target/debug/a.exe", "web/node_modules/x/i.js", "web/app.js"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        let mut got = project_files(&root, 300);
+        got.sort();
+        assert_eq!(got, ["Cargo.toml", "src/main.rs", "web/app.js"]);
+        assert_eq!(project_files(&root, 2).len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn matches_projects_by_folder_name() {

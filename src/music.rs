@@ -436,6 +436,11 @@ pub fn select(playlist: &str) {
     send(Cmd::Select(playlist.to_string()));
 }
 /// Plays one of her recorded lines, under the music. Use voice::say, which decides whether she speaks.
+/// Her voice is playing right now (the mic ignores her meanwhile).
+pub fn speaking() -> bool {
+    MUFFLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn speak(text: String) {
     send(Cmd::Voice(text));
 }
