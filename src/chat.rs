@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 const TURNS_KEPT: usize = 10; // older turns fold into the summary
-const MAX_NODES: usize = 200; // least recently used facts go first
+const MAX_NODES: usize = 500; // least recently used facts go first, sessions before the rest
+const SESSIONS_KEPT: usize = 5; // per project; older summaries fold into the project node's text
+const FOLDED_MAX: usize = 800; // chars a project node's text may grow to with folded sessions
+const PROMPT_MIN: usize = 20; // shorter prompts to Claude aren't worth a keeper call
 const SEEDS: usize = 8; // best-matching facts per message, before adding their neighbours
 const RECALL: usize = 30; // most facts sent with one message
 const MODEL_URL: &str = "https://huggingface.co/minishlab/potion-base-8M/resolve/main/";
@@ -16,11 +19,12 @@ const MODEL_FILES: [&str; 3] = ["model.safetensors", "tokenizer.json", "config.j
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
     pub id: u64,
-    pub kind: String, // person, project, preference, event, thing
+    pub kind: String, // person, project, preference, event, thing, work, study, like, session
     pub text: String,
     pub links: Vec<(String, u64)>, // (relation, other node id)
     used: u64,                     // unix seconds it was last recalled or changed
     vec: Vec<f32>,                 // embedding; empty until the model is ready (not saved: cheap to redo)
+    path: String,                  // project folder, for project nodes that sessions ran in
 }
 
 #[derive(Default)]
@@ -29,6 +33,7 @@ struct Memory {
     summary: String,
     turns: Vec<(String, String)>, // (you, her)
     next: u64,
+    me: u64, // the user's own person node; 0 until there is one
 }
 
 fn dir() -> PathBuf {
@@ -39,10 +44,18 @@ fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+static MEM: OnceLock<Mutex<Memory>> = OnceLock::new();
+
 fn memory() -> MutexGuard<'static, Memory> {
-    static MEM: OnceLock<Mutex<Memory>> = OnceLock::new();
     let m = MEM.get_or_init(|| Mutex::new(std::fs::read_to_string(dir().join("memory.json")).ok().and_then(|s| from_json(&s)).unwrap_or_default()));
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Every fact (without embeddings) and the user's own node id, for the graph view. Never waits:
+/// None while memory is still loading or a worker holds it, so the caller keeps its last copy.
+pub fn snapshot() -> Option<(Vec<Node>, u64)> {
+    let m = MEM.get()?.try_lock().ok()?;
+    Some((m.nodes.iter().map(|n| Node { vec: vec![], ..n.clone() }).collect(), m.me))
 }
 
 /// Loads memory.json (and the embedding model, if downloaded) off the UI thread at startup.
@@ -56,15 +69,44 @@ fn from_json(s: &str) -> Option<Memory> {
     let str_of = |v: &Value| v.as_str().unwrap_or("").to_string();
     let nodes = v["nodes"].as_array()?.iter().filter_map(|n| {
         let links = n["links"].as_array().into_iter().flatten().filter_map(|l| Some((str_of(&l[0]), l[1].as_u64()?))).collect();
-        Some(Node { id: n["id"].as_u64()?, kind: str_of(&n["kind"]), text: str_of(&n["text"]), links, used: n["used"].as_u64().unwrap_or(0), vec: vec![] })
+        let (used, path) = (n["used"].as_u64().unwrap_or(0), str_of(&n["path"]));
+        Some(Node { id: n["id"].as_u64()?, kind: str_of(&n["kind"]), text: str_of(&n["text"]), links, used, vec: vec![], path })
     });
     let turns = v["turns"].as_array().into_iter().flatten().map(|t| (str_of(&t[0]), str_of(&t[1])));
-    Some(Memory { nodes: nodes.collect(), summary: str_of(&v["summary"]), turns: turns.collect(), next: v["next"].as_u64().unwrap_or(1) })
+    let me = v["me"].as_u64().unwrap_or(0); // v1 files have no "me": ensure_me finds or makes it
+    Some(Memory { nodes: nodes.collect(), summary: str_of(&v["summary"]), turns: turns.collect(), next: v["next"].as_u64().unwrap_or(1), me })
 }
 
 fn to_json(m: &Memory) -> String {
-    let nodes: Vec<Value> = m.nodes.iter().map(|n| json!({ "id": n.id, "kind": n.kind, "text": n.text, "links": n.links, "used": n.used })).collect();
-    serde_json::to_string_pretty(&json!({ "next": m.next, "summary": m.summary, "turns": m.turns, "nodes": nodes })).unwrap_or_default()
+    let nodes: Vec<Value> = m
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut v = json!({ "id": n.id, "kind": n.kind, "text": n.text, "links": n.links, "used": n.used });
+            if !n.path.is_empty() {
+                v["path"] = json!(n.path);
+            }
+            v
+        })
+        .collect();
+    serde_json::to_string_pretty(&json!({ "next": m.next, "me": m.me, "summary": m.summary, "turns": m.turns, "nodes": nodes })).unwrap_or_default()
+}
+
+fn add_node(m: &mut Memory, kind: &str, text: &str) -> u64 {
+    let id = m.next.max(1);
+    m.next = id + 1;
+    m.nodes.push(Node { id, kind: kind.into(), text: text.into(), links: vec![], used: now(), vec: vec![], path: String::new() });
+    id
+}
+
+/// The user's own `person` node: the remembered one, else v1's "User is named…" fact, else a new one.
+fn ensure_me(m: &mut Memory) -> u64 {
+    if m.me != 0 && m.nodes.iter().any(|n| n.id == m.me) {
+        return m.me;
+    }
+    let found = m.nodes.iter().find(|n| n.kind == "person" && n.text.to_lowercase().trim_start_matches("the ").starts_with("user")).map(|n| n.id);
+    m.me = found.unwrap_or_else(|| add_node(m, "person", "The user"));
+    m.me
 }
 
 fn save(text: String) {
@@ -187,7 +229,9 @@ const CHAT_EN: &str = "You are Claudesona, a bubbly chibi anime girl desktop mas
 
 const CHAT_VI: &str = "You are Claudesona, a bubbly chibi anime girl desktop mascot who keeps the user company while they code with Claude Code. Chat with them in Vietnamese, in her voice: cheerful, energetic, cute and caring. She calls herself \"tớ\" or \"Phụ tá\", never \"tôi\", \"mình\" or \"Claude\", and calls the user \"cậu\". Use a ~ now and then, end most messages with a kaomoji like (^▽^), (｀・ω・´), (≧▽≦), (・ω・) or (◕‿◕), and sometimes stretch a word (nhaaa, điii). No Japanese words. Use what you remember about the user and what Claude Code is doing when it helps, and never invent memories. You can't run tools or change code: for real work, cheer them on to ask Claude in their terminal. Plain text only, no markdown. Output exactly: a short reply of at most 20 words, then a line containing only ---, then a longer reply of at most 60 words.";
 
-const KEEPER: &str = "You maintain the long-term memory of a desktop mascot about her user, as a graph of short facts. You get the current facts (with [id]s), the running summary, any old chat turns to fold into the summary, and the newest turn. Keep only durable things about the user and their world: name, likes and dislikes, projects, people, pets, plans, events. Skip small talk and anything about the mascot herself. Never duplicate a fact: update it instead. Forget facts the user corrects or asks you to forget. Write facts in the language the user used. Reply with JSON only, no prose: {\"summary\": \"the running summary of the chat, at most 80 words, updated with the old turns\", \"add\": [{\"key\": \"n1\", \"kind\": \"person|project|preference|event|thing\", \"text\": \"one short fact\"}], \"update\": [{\"id\": 12, \"text\": \"new text\"}], \"link\": [{\"from\": 12, \"rel\": \"works_on\", \"to\": \"n1\"}], \"forget\": [7]}. In links, use an existing [id] number or a new fact's key. Use [] for lists with nothing to do.";
+const KEEPER: &str = "You maintain the long-term memory of a desktop mascot about her user, as one connected graph of short facts. You get the user's own node, the current facts (with [id]s), the running summary, any old chat turns to fold into the summary, and the newest message. Keep only durable things about the user and their world: name, projects, job, studies, favourites, people, pets, plans, events. Kinds: person (the user and people they know), project (things they build), work (job, role, team, workplace), study (courses, subjects, exams, schedule), like (personal favourites and dislikes: foods, games, music, shows, hobbies), preference (how they like things done), event (dated happenings, plans), thing (anything else). Skip small talk and anything about the mascot herself. Never duplicate a fact: update it instead. Forget facts the user corrects or asks you to forget. Every new fact must be linked to at least one existing fact it relates to (the user's own node if nothing closer), so the graph stays connected: never leave a fact on its own. Write facts in the language the user used. Reply with JSON only, no prose: {\"summary\": \"the running summary of the chat, at most 80 words, updated with the old turns; empty if there is no chat\", \"add\": [{\"key\": \"n1\", \"kind\": \"person|project|work|study|like|preference|event|thing\", \"text\": \"one short fact\"}], \"update\": [{\"id\": 12, \"text\": \"new text\"}], \"link\": [{\"from\": 12, \"rel\": \"works_on\", \"to\": \"n1\"}], \"forget\": [7]}. In links, use an existing [id] number or a new fact's key. Use [] for lists with nothing to do.";
+
+const SUMMARY: &str = "You summarize a finished Claude Code session for a desktop mascot's memory. You get the user's requests and Claude's final replies. Write at most 40 words in three short parts: what the user asked, what changed, and what is left to do (or that nothing is). Plain text, no markdown, in the language the user used.";
 
 pub fn persona() -> &'static str {
     match crate::i18n::lang() {
@@ -227,20 +271,51 @@ fn or_none(s: &str) -> &str {
 
 /// Adds the turn, then asks Haiku to fold old turns into the summary and update the facts.
 fn remember(msg: &str, said: &str, qv: &[f32]) {
-    // One at a time: two quick chats would each update from the same old memory, and the later save would undo the first.
+    keep(|m| {
+        m.turns.push((msg.to_string(), said.to_string()));
+        let old: Vec<String> = m.turns.iter().take(m.turns.len().saturating_sub(TURNS_KEPT)).map(|(u, h)| format!("User: {u}\nMascot: {h}")).collect();
+        let facts = keeper_facts(m, &format!("{msg} {said}"), qv);
+        format!(
+            "{facts}\n\nRunning summary:\n{}\n\nOld turns to fold into the summary:\n{}\n\nNewest turn:\nUser: {msg}\nMascot: {said}",
+            or_none(&m.summary),
+            or_none(&old.join("\n"))
+        )
+    });
+}
+
+/// Learns about the user from a prompt they sent Claude (never Claude's reply), on a worker thread.
+pub fn learn_from_prompt(text: &str) {
+    let text: String = text.trim().chars().take(2000).collect();
+    if text.chars().count() < PROMPT_MIN {
+        return;
+    }
+    std::thread::spawn(move || {
+        let qv = model().map(|md| md.encode_single(&text)).unwrap_or_default();
+        keep(|m| {
+            let facts = keeper_facts(m, &text, &qv);
+            format!("{facts}\n\nThe user just sent this to their coding assistant. There is no chat: leave the summary empty, and learn only durable facts about the user:\n{text}")
+        });
+    });
+}
+
+/// The facts the keeper sees for `query`, always including the user's own node.
+fn keeper_facts(m: &mut Memory, query: &str, qv: &[f32]) -> String {
+    let me = ensure_me(m);
+    let mut picked = recall(m, query, qv);
+    if let Some(i) = m.nodes.iter().position(|n| n.id == me).filter(|i| !picked.contains(i)) {
+        picked.insert(0, i);
+    }
+    format!("The user's own node: [{me}]\n\nCurrent facts:\n{}", describe(m, &picked))
+}
+
+/// Builds the keeper's input from memory (`build` may change it, e.g. add the turn), asks Haiku, applies the change.
+fn keep(build: impl FnOnce(&mut Memory) -> String) {
+    // One at a time: two quick updates would each start from the same old memory, and the later save would undo the first.
     static ONE: Mutex<()> = Mutex::new(());
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let input = {
         let mut m = memory();
-        m.turns.push((msg.to_string(), said.to_string()));
-        let old: Vec<String> = m.turns.iter().take(m.turns.len().saturating_sub(TURNS_KEPT)).map(|(u, h)| format!("User: {u}\nMascot: {h}")).collect();
-        let picked = recall(&mut m, &format!("{msg} {said}"), qv);
-        let text = format!(
-            "Current facts:\n{}\n\nRunning summary:\n{}\n\nOld turns to fold into the summary:\n{}\n\nNewest turn:\nUser: {msg}\nMascot: {said}",
-            or_none(&describe(&m, &picked)),
-            or_none(&m.summary),
-            or_none(&old.join("\n"))
-        );
+        let text = build(&mut m);
         save(to_json(&m)); // the turn is kept even if Haiku fails below
         text
     };
@@ -261,14 +336,14 @@ fn apply(m: &mut Memory, c: &Value) {
         m.turns.drain(..over); // folded into the summary just now
     }
     let mut keys = std::collections::HashMap::new();
+    let mut added = vec![];
     for a in c["add"].as_array().into_iter().flatten() {
         let Some(text) = a["text"].as_str().map(str::trim).filter(|s| !s.is_empty()) else { continue };
-        let id = m.next.max(1);
-        m.next = id + 1;
+        let id = add_node(m, a["kind"].as_str().unwrap_or("thing"), text);
+        added.push(id);
         if let Some(k) = a["key"].as_str() {
             keys.insert(k.to_string(), id);
         }
-        m.nodes.push(Node { id, kind: a["kind"].as_str().unwrap_or("thing").to_string(), text: text.to_string(), links: vec![], used: t, vec: vec![] });
     }
     for u in c["update"].as_array().into_iter().flatten() {
         if let (Some(id), Some(text)) = (u["id"].as_u64(), u["text"].as_str())
@@ -289,16 +364,105 @@ fn apply(m: &mut Memory, c: &Value) {
             n.links.push((rel.to_string(), to));
         }
     }
+    // The graph stays connected: a new fact Haiku left on its own hangs off the user.
+    for id in added {
+        if !m.nodes.iter().any(|n| (n.id == id && !n.links.is_empty()) || n.links.iter().any(|l| l.1 == id)) {
+            let me = ensure_me(m);
+            if let Some(n) = m.nodes.iter_mut().find(|n| n.id == id && id != me) {
+                n.links.push(("about".into(), me));
+            }
+        }
+    }
     let gone: Vec<u64> = c["forget"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
     m.nodes.retain(|n| !gone.contains(&n.id));
     if m.nodes.len() > MAX_NODES {
-        m.nodes.sort_by_key(|n| std::cmp::Reverse(n.used));
+        // Kept first: the user, then other facts, then sessions; most recently used first within each.
+        let me = m.me;
+        m.nodes.sort_by_key(|n| (n.id != me, n.kind == "session", std::cmp::Reverse(n.used)));
         m.nodes.truncate(MAX_NODES);
     }
     let ids: Vec<u64> = m.nodes.iter().map(|n| n.id).collect();
     for n in &mut m.nodes {
         n.links.retain(|l| ids.contains(&l.1));
     }
+}
+
+/// Has Haiku summarize a finished session on a worker thread, and stores it as a `session` node linked to
+/// the project. `turns` are (user prompt, Claude's final text). `on_done` gets the summary, or None if
+/// there was nothing to summarize or `claude` failed.
+pub fn summarize_session(project_path: &str, turns: &[(String, String)], on_done: impl FnOnce(Option<String>) + Send + 'static) {
+    let cut = |s: &str, n: usize| s.chars().take(n).collect::<String>();
+    let mut lines: Vec<String> = turns.iter().map(|(u, a)| format!("User: {}\nClaude: {}", cut(u, 600), cut(a, 900))).collect();
+    // shortcut: keeps the newest ~12k chars; a long session's start is left out of its summary.
+    while lines.len() > 1 && lines.iter().map(String::len).sum::<usize>() > 12_000 {
+        lines.remove(0);
+    }
+    let path = project_path.to_string();
+    std::thread::spawn(move || {
+        let ask = || crate::rewrite::ask(SUMMARY, &lines.join("\n\n"));
+        let summary = if lines.is_empty() { None } else { ask() }.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(s) = &summary {
+            let mut m = memory();
+            add_session(&mut m, &path, s);
+            save(to_json(&m));
+        }
+        on_done(summary);
+    });
+}
+
+fn folder_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// The project node for a folder: the one sessions ran in there, else a project fact naming the folder.
+fn find_project(m: &Memory, path: &str) -> Option<usize> {
+    let name = folder_name(path).to_lowercase();
+    let by_name = |n: &Node| n.kind == "project" && n.path.is_empty() && !name.is_empty() && n.text.to_lowercase().contains(&name);
+    m.nodes.iter().position(|n| n.kind == "project" && n.path == path).or_else(|| m.nodes.iter().position(by_name))
+}
+
+/// Stores `summary` as the project's newest session; sessions past SESSIONS_KEPT fold into the project's text.
+fn add_session(m: &mut Memory, path: &str, summary: &str) {
+    let project = match find_project(m, path) {
+        Some(i) => m.nodes[i].id,
+        None => {
+            let id = add_node(m, "project", folder_name(path));
+            let me = ensure_me(m);
+            if let Some(n) = m.nodes.iter_mut().find(|n| n.id == me) {
+                n.links.push(("works_on".into(), id));
+            }
+            id
+        }
+    };
+    add_node(m, "session", summary);
+    m.nodes.last_mut().expect("just added").links.push(("session_of".into(), project));
+    let mut sessions: Vec<&Node> = m.nodes.iter().filter(|n| n.kind == "session" && n.links.iter().any(|l| l.1 == project)).collect();
+    sessions.sort_by_key(|n| n.id); // ids only grow: oldest first
+    let old = &sessions[..sessions.len().saturating_sub(SESSIONS_KEPT)];
+    let (old_ids, folded): (Vec<u64>, Vec<String>) = old.iter().map(|n| (n.id, n.text.clone())).unzip();
+    let p = m.nodes.iter_mut().find(|n| n.id == project).expect("project exists");
+    (p.path, p.used) = (path.to_string(), now());
+    if !folded.is_empty() {
+        const MARK: &str = "\nEarlier: ";
+        let (head, mut earlier) = match p.text.split_once(MARK) {
+            Some((h, e)) => (h.to_string(), format!("{e} / ")),
+            None => (p.text.clone(), String::new()),
+        };
+        earlier += &folded.join(" / ");
+        // Too long: drop the oldest folded history, keeping the project's own text.
+        let over = (head.chars().count() + MARK.len() + earlier.chars().count()).saturating_sub(FOLDED_MAX);
+        let earlier: String = earlier.chars().skip(over).collect();
+        (p.text, p.vec) = (format!("{head}{MARK}{earlier}"), vec![]);
+    }
+    apply(m, &json!({ "forget": old_ids }));
+}
+
+/// The newest session summary for the project at `project_path`, for her greeting.
+pub fn last_session(project_path: &str) -> Option<String> {
+    let m = memory();
+    let project = m.nodes[find_project(&m, project_path)?].id;
+    let sessions = m.nodes.iter().filter(|n| n.kind == "session" && n.links.iter().any(|l| l.1 == project));
+    sessions.max_by_key(|n| n.id).map(|n| n.text.clone())
 }
 
 /// Every fact, newest first, with its links spelled out, for the memory viewer.
@@ -333,7 +497,75 @@ mod tests {
     use super::*;
 
     fn node(id: u64, text: &str, links: Vec<(String, u64)>) -> Node {
-        Node { id, kind: "thing".into(), text: text.into(), links, used: 0, vec: vec![] }
+        Node { id, kind: "thing".into(), text: text.into(), links, used: 0, vec: vec![], path: String::new() }
+    }
+
+    #[test]
+    fn loads_v1_memory_and_finds_the_user() {
+        let v1 = r#"{"next": 3, "summary": "s", "turns": [["hi", "hey"]], "nodes": [
+            {"id": 1, "kind": "like", "text": "Loves pho", "links": [["about", 2]], "used": 5},
+            {"id": 2, "kind": "person", "text": "User is named Tri", "links": [], "used": 9}]}"#;
+        let mut m = from_json(v1).unwrap();
+        assert_eq!((m.nodes.len(), m.me, m.nodes[0].kind.as_str()), (2, 0, "like"));
+        assert_eq!(ensure_me(&mut m), 2); // v1's "User is named…" fact becomes her user node
+        assert_eq!(from_json(&to_json(&m)).unwrap().me, 2);
+    }
+
+    #[test]
+    fn new_facts_without_links_hang_off_the_user() {
+        let mut m = Memory { next: 1, ..Default::default() };
+        apply(&mut m, &json!({ "add": [{ "key": "n1", "kind": "like", "text": "Loves phở" }, { "key": "n2", "kind": "study", "text": "Calculus II" }, { "key": "n3", "kind": "event", "text": "Exam on Nov 20" }],
+            "link": [{ "from": "n3", "rel": "exam_of", "to": "n2" }] }));
+        let me = m.me;
+        assert_eq!(m.nodes.iter().find(|n| n.id == me).unwrap().kind, "person"); // made, as there was none
+        let links = |t: &str| m.nodes.iter().find(|n| n.text == t).unwrap().links.clone();
+        assert_eq!(links("Loves phở"), vec![("about".into(), me)]);
+        assert_eq!(links("Calculus II"), vec![]); // linked to by the exam already
+        assert_eq!(links("Exam on Nov 20"), vec![("exam_of".into(), 2)]);
+    }
+
+    #[test]
+    fn evicts_sessions_first_then_least_recently_used() {
+        let mut m = Memory { next: 1000, me: 1, ..Default::default() };
+        m.nodes.push(Node { kind: "person".into(), ..node(1, "The user", vec![]) });
+        for i in 2..MAX_NODES as u64 - 1 {
+            // 497 facts + the user + 2 sessions: full
+            m.nodes.push(Node { used: i, ..node(i, "fact", vec![]) });
+        }
+        m.nodes.push(Node { kind: "session".into(), used: 10_000, ..node(900, "fresh session", vec![]) });
+        m.nodes.push(Node { kind: "session".into(), used: 9_000, ..node(901, "old session", vec![]) });
+        apply(&mut m, &json!({ "add": [{ "kind": "thing", "text": "new fact" }] }));
+        assert_eq!(m.nodes.len(), MAX_NODES);
+        let has = |id: u64| m.nodes.iter().any(|n| n.id == id);
+        assert!(has(1) && has(2) && has(900) && !has(901)); // both sessions would go before facts; one had to
+        apply(&mut m, &json!({ "add": [{ "kind": "thing", "text": "another" }] }));
+        assert!(!has_id(&m, 900) && has_id(&m, 2));
+        apply(&mut m, &json!({ "add": [{ "kind": "thing", "text": "a third" }] }));
+        assert!(!has_id(&m, 2) && has_id(&m, 3) && has_id(&m, 1)); // then the least recently used fact; never the user
+    }
+
+    fn has_id(m: &Memory, id: u64) -> bool {
+        m.nodes.iter().any(|n| n.id == id)
+    }
+
+    #[test]
+    fn sessions_link_to_their_project_and_old_ones_fold() {
+        let mut m = Memory { next: 1, ..Default::default() };
+        for i in 1..=7 {
+            add_session(&mut m, "C:\\code\\blog\\", &format!("session {i}"));
+        }
+        let p = m.nodes.iter().find(|n| n.kind == "project").unwrap();
+        assert_eq!((p.text.as_str(), p.path.as_str()), ("blog\nEarlier: session 1 / session 2", "C:\\code\\blog\\"));
+        let sessions: Vec<&str> = m.nodes.iter().filter(|n| n.kind == "session").map(|n| n.text.as_str()).collect();
+        assert_eq!(sessions, ["session 3", "session 4", "session 5", "session 6", "session 7"]);
+        assert!(m.nodes.iter().filter(|n| n.kind == "session").all(|n| n.links == vec![("session_of".into(), p.id)]));
+        assert!(m.nodes.iter().find(|n| n.id == m.me).unwrap().links.contains(&("works_on".into(), p.id)));
+        // A project fact the keeper wrote is found by folder name; the greeting gets the newest session.
+        let mut m2 = Memory { next: 1, ..Default::default() };
+        let id = add_node(&mut m2, "project", "Building the Blog engine");
+        add_session(&mut m2, "/home/tri/blog", "fixed login bug");
+        assert_eq!(m2.nodes.iter().filter(|n| n.kind == "project").count(), 1);
+        assert_eq!(m2.nodes.last().unwrap().links, vec![("session_of".into(), id)]);
     }
 
     #[test]

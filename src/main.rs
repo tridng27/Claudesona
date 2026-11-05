@@ -8,6 +8,7 @@ mod game;
 mod sudoku;
 mod i18n;
 mod log;
+mod memgraph;
 mod music;
 mod rewrite;
 mod session;
