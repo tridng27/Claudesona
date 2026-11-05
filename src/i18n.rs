@@ -3,8 +3,9 @@
 use crate::anim::Pose;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Lang {
+    #[default]
     En,
     Vi,
 }
@@ -633,6 +634,14 @@ pub fn mode_label(mode: crate::music::Mode) -> &'static str {
         crate::music::Mode::Loop => ui().mode_loop,
         crate::music::Mode::LoopOne => ui().mode_loop_one,
         crate::music::Mode::Shuffle => ui().mode_shuffle,
+    }
+}
+
+/// Her answer when asked for a slash command a hosted session doesn't offer.
+pub fn cant_slash(lang: Lang, command: &str) -> String {
+    match lang {
+        Lang::En => format!("Ehh, your sidekick can't do /{command} from here, sorry~ (・ω・)"),
+        Lang::Vi => format!("Ơ, tớ không làm được /{command} từ đây rồi, xin lỗi cậu nha~ (・ω・)"),
     }
 }
 
