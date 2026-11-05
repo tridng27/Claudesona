@@ -94,7 +94,9 @@ pub fn set_hooks(settings: &mut Value, cmd: Option<&str>) {
     let Some(map) = hooks.as_object_mut() else { return };
     for event in EVENTS {
         if let Some(list) = map.get_mut(event).and_then(Value::as_array_mut) {
-            list.retain(|entry| !entry.to_string().contains("claudesona"));
+            // Only entries running her own exe: `"<path>/claudesona[.exe]" hook`, as install writes them.
+            let ours = |e: &Value| e["hooks"].as_array().into_iter().flatten().any(|h| h["command"].as_str().is_some_and(|c| c.ends_with("/claudesona.exe\" hook") || c.ends_with("/claudesona\" hook")));
+            list.retain(|entry| !ours(entry));
         }
         if let Some(cmd) = cmd {
             let list = map.entry(event).or_insert_with(|| json!([]));
@@ -199,8 +201,14 @@ mod tests {
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "Bash|PowerShell|AskUserQuestion");
         set_hooks(&mut s, None);
         assert_eq!(s, json!({ "theme": "dark", "hooks": { "Notification": [{ "hooks": [other] }] } }));
+        // A hook of your own that only mentions her name stays.
+        let mine = json!({ "hooks": [{ "type": "command", "command": "~/bin/claudesona-notify.sh" }] });
+        let mut s = json!({ "hooks": { "SessionStart": [mine.clone()] } });
+        set_hooks(&mut s, Some("\"/home/me/.local/share/claudesona/claudesona\" hook"));
+        set_hooks(&mut s, None);
+        assert_eq!(s, json!({ "hooks": { "SessionStart": [mine] } }));
         let mut empty = json!({});
-        set_hooks(&mut empty, Some("claudesona.exe hook"));
+        set_hooks(&mut empty, Some("\"C:/x/claudesona.exe\" hook"));
         set_hooks(&mut empty, None);
         assert_eq!(empty, json!({}));
     }

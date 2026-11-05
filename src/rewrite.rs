@@ -21,7 +21,8 @@ pub fn persona() -> &'static str {
 /// (short, long) in her voice and the current language, or None if `claude` failed.
 /// `partial` gets the short version as it streams in.
 pub fn rewrite(text: &str, partial: impl FnMut(&str)) -> Option<(String, Option<String>)> {
-    split(&ask_stream(persona(), text, short_part(partial))?)
+    let text: String = text.chars().take(6000).collect(); // Claude's replies can be huge; the start says what happened
+    split(&ask_stream(persona(), &text, short_part(partial))?)
 }
 
 /// Wraps a callback so it only sees the short version (the text before the `---` line) as it grows.
@@ -106,7 +107,6 @@ pub fn ask_stream(system: &str, input: &str, mut partial: impl FnMut(&str)) -> O
 fn answer(mut child: Child, input: &str, partial: &mut impl FnMut(&str)) -> Option<String> {
     let result = (|| {
         // Text goes through stdin: Windows command lines are length-limited.
-        let input: String = input.chars().take(6000).collect();
         let msg = serde_json::json!({ "type": "user", "message": { "role": "user", "content": input } });
         let mut stdin = child.stdin.take()?;
         writeln!(stdin, "{msg}").ok()?;

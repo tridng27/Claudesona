@@ -133,10 +133,15 @@ pub fn work_kind(name: &str, input: &Value) -> Work {
             let c = words(cmd);
             if c.contains(" git commit ") || c.contains(" git push ") {
                 Work::Shipping
-            } else if command_kind(cmd) == 0 {
-                Work::Testing
+            } else if c.contains(" sed -i") {
+                Work::Editing
             } else {
-                Work::Plain
+                match command_kind(cmd) {
+                    0 => Work::Testing,
+                    5 => Work::Web,
+                    7 => Work::Reading, // looking around: ls, cat, grep, Get-Content…
+                    _ => Work::Plain,
+                }
             }
         }
         _ => Work::Plain,
@@ -174,7 +179,7 @@ fn command_kind(cmd: &str) -> usize {
     let c = words(cmd);
     let has = |keys: &[&str]| keys.iter().any(|k| c.contains(k));
     // Whole test-runner words, so paths like tests/foo.rs and the shell's `test -f` don't count.
-    if has(&[" cargo test ", " cargo nextest ", " npm test ", " npm run test", " pnpm test ", " yarn test ", " npx jest", " jest ", "pytest", "vitest", " go test ", " dotnet test ", " mvn test ", "gradle test ", " gradlew test ", " ctest ", " -m unittest ", " rspec ", " mocha ", " phpunit ", "invoke-pester"]) {
+    if has(&[" cargo test ", " cargo nextest ", " npm test ", " npm run test", " pnpm test ", " yarn test ", " npx jest", " jest ", " pytest", " vitest", " go test ", " dotnet test ", " mvn test ", "gradle test ", " gradlew test ", " ctest ", " -m unittest ", " rspec ", " mocha ", " phpunit ", "invoke-pester"]) && !has(&[" install ", " cargo add ", " uv add ", " poetry add "]) {
         0
     } else if has(&[" git ", " gh "]) {
         1
@@ -352,7 +357,12 @@ mod tests {
         assert_eq!(sh("npm run test:unit"), Work::Testing);
         assert_eq!(sh("git add -A && git commit -m \"fix\""), Work::Shipping);
         assert_eq!(sh("cargo test && git push origin main"), Work::Shipping);
-        assert_eq!(sh("cat tests/foo.rs"), Work::Plain);
+        assert_eq!(sh("cat tests/foo.rs"), Work::Reading);
+        assert_eq!(sh("cd /c/x; grep -n foo src/main.rs | head"), Work::Reading);
+        assert_eq!(sh("Get-Content src/main.rs -TotalCount 40"), Work::Reading);
+        assert_eq!(sh("sed -i 's/a/b/' src/main.rs"), Work::Editing);
+        assert_eq!(sh("curl -s https://example.com"), Work::Web);
+        assert_eq!(sh("pip install pytest"), Work::Plain);
         assert_eq!(sh("test -f .env && echo ok"), Work::Plain);
         assert_eq!(sh("git status"), Work::Plain);
     }

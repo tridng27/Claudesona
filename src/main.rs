@@ -33,31 +33,31 @@ const BUBBLE_ROOM: f32 = 240.0; // space above her head for the speech bubble (a
 const MINI: f32 = 0.42; // mini height relative to hers
 const POPUP_W: f32 = 270.0; // right-click popup width
 const POPUP_SLIDE: f32 = 28.0; // points the popup slides out from her
-const POPUP_IN: f32 = 0.18; // seconds the popup takes to slide and fade in
-const FILLER_EVERY: f32 = 3.0; // seconds each general working line shows
-const FINISHED_FLASH: f32 = 2.5; // seconds of Waiting pose when work is confirmed finished
-const POSE_FADE: f32 = 0.12; // seconds to crossfade between poses
-const TYPING_SHOWS: f32 = 1.5; // seconds she keeps cheering after your last keystroke
-const CHEER_ON_SEND: f32 = 2.5; // seconds she cheers when your prompt reaches the log
-const CHEER_LINE_EVERY: f32 = 20.0; // at most one cheer line this often
+const POPUP_IN: f64 = 0.18; // seconds the popup takes to slide and fade in
+const FILLER_EVERY: f64 = 3.0; // seconds each general working line shows
+const FINISHED_FLASH: f64 = 2.5; // seconds of Waiting pose when work is confirmed finished
+const POSE_FADE: f64 = 0.12; // seconds to crossfade between poses
+const TYPING_SHOWS: f64 = 1.5; // seconds she keeps cheering after your last keystroke
+const CHEER_ON_SEND: f64 = 2.5; // seconds she cheers when your prompt reaches the log
+const CHEER_LINE_EVERY: f64 = 20.0; // at most one cheer line this often
 const SWING_ROOM: f32 = 140.0; // see-through window room on each side, so a big swing isn't cut off
-const COFFEE_FOR: f32 = 8.0; // seconds she sips after you give her coffee
+const COFFEE_FOR: f64 = 8.0; // seconds she sips after you give her coffee
 const DIZZY_AT: f32 = 8.0; // dragged this far (in her heights, less what's worn off) and she gets dizzy
 const DIZZY_WEARS_OFF: f32 = 2.0; // heights per second
-const DIZZY_FOR: f32 = 4.0; // seconds she stays dizzy
-const REWRITE_TIMEOUT: f32 = 30.0;
+const DIZZY_FOR: f64 = 4.0; // seconds she stays dizzy
+const REWRITE_TIMEOUT: f64 = 30.0;
 const CREAM: Color32 = Color32::from_rgb(0xFB, 0xF4, 0xEA);
 const CORAL: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
 const INK: Color32 = Color32::from_rgb(0x4A, 0x2C, 0x22);
 const SOFT_INK: Color32 = Color32::from_rgb(0x8A, 0x5A, 0x4A);
 const SIZES: [(&str, f32); 3] = [("S", 0.75), ("M", 1.0), ("L", 1.35)]; // egui zoom; eframe saves it with egui's memory
-const IDLE_NUDGE: f32 = 25.0; // quiet seconds before she sparkles and offers help (after any bubble is gone)
-const MUSIC_AFTER: f32 = 300.0; // idle seconds before she puts music on by herself
-const SLEEP_AFTER: f32 = 600.0; // seconds with nothing going on before she dozes off (music keeps playing)
-const OOPS_FOR: f32 = 2.0; // seconds she sobs after a tool call fails
-const DAZED_FOR: f32 = 4.0; // seconds of spiral eyes after Claude compacts its context
+const IDLE_NUDGE: f64 = 25.0; // quiet seconds before she sparkles and offers help (after any bubble is gone)
+const MUSIC_AFTER: f64 = 300.0; // idle seconds before she puts music on by herself
+const SLEEP_AFTER: f64 = 600.0; // seconds with nothing going on before she dozes off (music keeps playing)
+const OOPS_FOR: f64 = 2.0; // seconds she sobs after a tool call fails
+const DAZED_FOR: f64 = 4.0; // seconds of spiral eyes after Claude compacts its context
 // "What can I do": she shows each phase in its pose while explaining it.
-const TOUR_STEP: f32 = 6.5; // seconds per step
+const TOUR_STEP: f64 = 6.5; // seconds per step
 const WORK_MUSIC_KEY: &str = "work_music"; // eframe storage key for the "While working" choice
 const VOICE_KEY: &str = "voice"; // her voice on or off
 const MUSIC_MODE_KEY: &str = "music_mode"; // Loop / Loop 1 / Shuffle
@@ -66,10 +66,10 @@ const LANG_KEY: &str = "lang"; // EN or VI
 
 enum Msg {
     Log(PathBuf, Event),
-    Rewritten { short: String, long: Option<String>, at: f32 }, // `at`: when its reply arrived, to match it
+    Rewritten { short: String, long: Option<String>, at: f64 }, // `at`: when its reply arrived, to match it
     Game { word: String, hint: String }, // a new hangman word from Haiku
     Chat(Option<(String, Option<String>)>), // her answer to your chat message (None: `claude` failed)
-    Partial { reply: Option<f32>, short: String }, // the short answer so far, streaming in (chat: None, or the rewrite of the reply that arrived at that time)
+    Partial { reply: Option<f64>, short: String }, // the short answer so far, streaming in (chat: None, or the rewrite of the reply that arrived at that time)
     Hook(serde_json::Value), // from `claudesona hook`, or {"quit":true} from install/uninstall
 }
 
@@ -84,7 +84,7 @@ struct Bubble {
     short: String,
     long: Option<String>,
     expanded: bool,
-    hide_at: f32,
+    hide_at: f64,
     is_label: bool, // activity label rather than speech
 }
 
@@ -97,7 +97,7 @@ struct Popup {
     size: Vec2,    // measured last frame
     input: String, // the chat box
     frames: u32,
-    opened: f32, // when it opened, for the slide-and-fade in
+    opened: f64, // when it opened, for the slide-and-fade in
     had_focus: bool,
     memories: bool,       // the memory list is open
     confirm_forget: bool, // "Forget everything" was clicked once
@@ -110,7 +110,7 @@ struct Popup {
 struct Mini {
     id: String,
     label: String,
-    done_at: Option<f32>,
+    done_at: Option<f64>,
 }
 
 /// `<pose>.png` in a `skin` folder next to the exe replaces the built-in art for that pose.
@@ -262,40 +262,40 @@ struct App {
     sprites: Vec<Sprite>, // indexed by Pose as usize
     pose: Pose,
     start: Instant,
-    poke_at: Option<f32>,
+    poke_at: Option<f64>,
     held: bool,  // you're dragging her
     swing: Vec2, // her pendulum while held: angle in degrees, speed in rad/s
-    coffee_until: f32, // sipping the coffee you gave her until then
+    coffee_until: f64, // sipping the coffee you gave her until then
     dizzy: f32,       // how shaken she is, in heights dragged
-    dizzy_until: f32, // seeing stars until then
-    hold: Option<(Pos2, f32, f32)>, // while we move the window ourselves: last cursor (screen points), its sideways speed, time
-    blink_at: f32,
+    dizzy_until: f64, // seeing stars until then
+    hold: Option<(Pos2, f32, f64)>, // while we move the window ourselves: last cursor (screen points), its sideways speed, time
+    blink_at: f64,
     shown: Pose,      // the pose drawn last frame
     prev_shown: Pose, // the one before it, fading out
-    shown_at: f32,    // when `shown` started
+    shown_at: f64,    // when `shown` started
     rng: u64,
     inbox: Receiver<Msg>,
     outbox: Sender<Msg>,
     session: Option<PathBuf>, // the Claude session she follows: the one you last typed in
     bubble: Option<Bubble>,
-    pending_reply: Option<(String, f32)>, // raw reply waiting for its rewrite, and when it arrived
+    pending_reply: Option<(String, f64)>, // raw reply waiting for its rewrite, and when it arrived
     minis: Vec<Mini>,
     hit_rects: Vec<Rect>, // bubbles and menu drawn last frame, which must stay clickable
     passthrough: bool,
-    waiting_since: f32,
+    waiting_since: f64,
     waiting_line: &'static str, // the permission line picked for this prompt, so it doesn't change while she waits
     hwnd: isize,
     placed: bool, // checked that she's on screen after eframe restored her position
     first_run: bool, // no saved window position yet
     terminal: isize, // foreground window when you last sent a prompt; double-click brings it back
-    hidden_until: f32,
+    hidden_until: f64,
     shells: Vec<String>, // background commands still running in the followed session (task ids)
-    nudge_at: f32,       // when she next offers help, if she stays idle and quiet
-    sparkle_at: f32,     // when her last idle sparkle started
-    idle_since: f32,     // start of the current idle stretch
+    nudge_at: f64,       // when she next offers help, if she stays idle and quiet
+    sparkle_at: f64,     // when her last idle sparkle started
+    idle_since: f64,     // start of the current idle stretch
     music: Option<bool>, // playing; true if she started it herself (it stops when work starts)
     work_music: bool,    // use the music pose instead of the working pose while Claude works
-    tour: Option<(f32, usize)>, // "What can I do": start time and the step already said
+    tour: Option<(f64, usize)>, // "What can I do": start time and the step already said
     playlist_open: bool,
     view_list: usize,          // playlist shown in the song list
     list_scroll: usize,        // first song row shown
@@ -311,19 +311,19 @@ struct App {
     popup: Option<Popup>,
     chat_pending: bool,
     last_reply: String, // Claude's last reply, plain, so chat knows what just happened
-    finished_at: f32,   // when Claude's work was last confirmed finished: she shows Done briefly
+    finished_at: f64,   // when Claude's work was last confirmed finished: she shows Done briefly
     work: log::Work,    // what the current tool call is doing, for her working pose
-    oops_until: f32,    // a tool call failed: sobbing until then
-    dazed_until: f32,   // Claude compacted its context: spiral eyes until then
-    quiet_since: f32,   // start of the stretch with nothing going on; she sleeps after SLEEP_AFTER
+    oops_until: f64,    // a tool call failed: sobbing until then
+    dazed_until: f64,   // Claude compacted its context: spiral eyes until then
+    quiet_since: f64,   // start of the stretch with nothing going on; she sleeps after SLEEP_AFTER
     voice_on: bool,     // remembered
     filler: usize,      // the working line she said last
     last_input: u32,    // OS tick of the last keyboard or mouse input seen
     last_cursor: Option<(f32, f32)>,
-    keys: Vec<f32>,     // recent inputs in your terminal with the mouse still: keystrokes
-    typed_at: f32,      // last keystroke while she's cheering you on
-    cheer_until: f32,   // cheering because a prompt was just sent
-    cheer_said: f32,    // when she last said a cheer line
+    keys: Vec<f64>,     // recent inputs in your terminal with the mouse still: keystrokes
+    typed_at: f64,      // last keystroke while she's cheering you on
+    cheer_until: f64,   // cheering because a prompt was just sent
+    cheer_said: f64,    // when she last said a cheer line
 }
 
 impl App {
@@ -507,13 +507,13 @@ impl App {
         (self.rng % 10_000) as f32 / 10_000.0
     }
 
-    fn say(&mut self, short: String, long: Option<String>, t: f32) {
+    fn say(&mut self, short: String, long: Option<String>, t: f64) {
         voice::say(&short, voice::Mode::Chatter); // only her recorded lines; replies and chat speak live (see say_live)
-        let hide_at = t + 8.0 + short.chars().count() as f32 / 12.0; // roughly reading time
+        let hide_at = t + 8.0 + short.chars().count() as f64 / 12.0; // roughly reading time
         self.bubble = Some(Bubble { short, long, expanded: false, hide_at, is_label: false });
     }
 
-    fn label(&mut self, text: String, t: f32) {
+    fn label(&mut self, text: String, t: f64) {
         self.bubble = Some(Bubble { short: text, long: None, expanded: false, hide_at: t + 120.0, is_label: true });
     }
 
@@ -523,7 +523,7 @@ impl App {
     }
 
     /// Back to her resting pose. Work going to Idle is confirmed finished: she shows Done briefly (your turn).
-    fn settle(&mut self, t: f32) {
+    fn settle(&mut self, t: f64) {
         let was = self.pose;
         self.pose = self.rest();
         if was != Pose::Idle && self.pose == Pose::Idle {
@@ -531,7 +531,7 @@ impl App {
         }
     }
 
-    fn set_music(&mut self, on: bool, t: f32) {
+    fn set_music(&mut self, on: bool, t: f64) {
         if on {
             music::play();
             self.music = Some(false);
@@ -600,7 +600,7 @@ impl App {
     }
 
     /// Her line, the 9x9 grid, and beside it a 1-9 pad and the buttons. Click a cell, then a number.
-    fn sudoku_panel(&mut self, ui: &egui::Ui, painter: &Painter, anchor: Pos2, t: f32) {
+    fn sudoku_panel(&mut self, ui: &egui::Ui, painter: &Painter, anchor: Pos2, t: f64) {
         let Some(s) = &self.sudoku else { return };
         let text = i18n::ui();
         let w = WIDTH - 40.0;
@@ -687,7 +687,7 @@ impl App {
     }
 
     /// The popup beside her, on whichever side has more room.
-    fn open_popup(&self, body: Rect, t: f32) -> Option<Popup> {
+    fn open_popup(&self, body: Rect, t: f64) -> Option<Popup> {
         let inner = self.ctx.input(|i| i.viewport().inner_rect)?;
         let her = body.translate(inner.min.to_vec2());
         let work = os::work_area(self.hwnd)
@@ -699,12 +699,12 @@ impl App {
         Some(Popup { her, work, left, size: vec2(POPUP_W, 360.0), input: String::new(), frames: 0, opened: t, had_focus: false, memories: false, confirm_forget: false, voice_setup: false, voice_id: String::new(), voice_key: String::new(), confirm_reset: false })
     }
 
-    fn show_popup(&mut self, ctx: &egui::Context, t: f32) {
+    fn show_popup(&mut self, ctx: &egui::Context, t: f64) {
         let Some(p) = &self.popup else { return };
         let x = if p.left { p.her.left() - p.size.x - 6.0 } else { p.her.right() + 6.0 };
         let x = x.min(p.work.right() - p.size.x).max(p.work.left());
         // Slides out from her side: starts POPUP_SLIDE closer to her and eases out to its place.
-        let k = popup_in(t - p.opened);
+        let k = popup_in((t - p.opened) as f32);
         let x = x + (1.0 - k) * POPUP_SLIDE * if p.left { 1.0 } else { -1.0 };
         let y = (p.her.bottom() - p.size.y).min(p.work.bottom() - p.size.y).max(p.work.top());
         let builder = egui::ViewportBuilder::default()
@@ -721,7 +721,7 @@ impl App {
     }
 
     /// The menu, the chat box and her memories. Runs inside the popup's own window.
-    fn popup_ui(&mut self, ui: &mut egui::Ui, t: f32) {
+    fn popup_ui(&mut self, ui: &mut egui::Ui, t: f64) {
         let Some(mut p) = self.popup.take() else { return };
         let text = i18n::ui();
         let ctx = ui.ctx().clone();
@@ -734,7 +734,7 @@ impl App {
         let mut close = esc || close_asked || (p.had_focus && focused == Some(false));
         *ui.visuals_mut() = egui::Visuals::light();
         ui.visuals_mut().override_text_color = Some(INK);
-        let k = popup_in(t - p.opened);
+        let k = popup_in((t - p.opened) as f32);
         ui.set_opacity(k);
         if k < 1.0 {
             ctx.request_repaint();
@@ -891,7 +891,7 @@ impl App {
     }
 
     /// Sends your chat message to Haiku on a worker thread, with what Claude is doing right now.
-    fn send_chat(&mut self, msg: String, t: f32) {
+    fn send_chat(&mut self, msg: String, t: f64) {
         self.chat_pending = true;
         self.label(i18n::ui().chat_thinking.into(), t);
         let doing = match (self.pose, &self.bubble) {
@@ -913,7 +913,7 @@ impl App {
         });
     }
 
-    fn handle(&mut self, msg: Msg, t: f32) {
+    fn handle(&mut self, msg: Msg, t: f64) {
         // A new prompt or a permission request ends the introduction; other activity carries on underneath it.
         if matches!(msg, Msg::Log(_, Event::Prompt)) || matches!(&msg, Msg::Hook(v) if v["hook_event_name"] == "PermissionRequest") {
             self.tour = None;
@@ -1028,7 +1028,7 @@ impl App {
         }
     }
 
-    fn apply(&mut self, ev: Event, t: f32) {
+    fn apply(&mut self, ev: Event, t: f64) {
         match ev {
             Event::Prompt => {
                 rewrite::prewarm(rewrite::persona()); // ready for this turn's reply
@@ -1115,7 +1115,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let ctx = self.ctx.clone();
-        let t = self.start.elapsed().as_secs_f32();
+        let t = self.start.elapsed().as_secs_f64(); // f64: an f32 count of seconds goes coarse after a few days of uptime
         while let Ok(msg) = self.inbox.try_recv() {
             self.handle(msg, t);
         }
@@ -1162,11 +1162,12 @@ impl eframe::App for App {
         self.minis.retain(|m| m.done_at.is_none_or(|d| t - d < 2.0));
         // Hidden: keep following Claude, but draw nothing and let every click through.
         if t < self.hidden_until {
+            self.quiet_since = t; // hiding isn't a quiet stretch: she comes back awake
             if !self.passthrough {
                 self.passthrough = true;
                 ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(true));
             }
-            ctx.request_repaint_after(std::time::Duration::from_secs_f32(self.hidden_until - t));
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(self.hidden_until - t));
             return;
         }
 
@@ -1226,7 +1227,7 @@ impl eframe::App for App {
                         self.sparkle_at = t;
                     }
                 }
-                tour_line = Some(Bubble { short: line.to_string(), long: None, expanded: false, hide_at: f32::MAX, is_label: false });
+                tour_line = Some(Bubble { short: line.to_string(), long: None, expanded: false, hide_at: f64::MAX, is_label: false });
             } else {
                 self.tour = None;
             }
@@ -1235,7 +1236,7 @@ impl eframe::App for App {
             pose = Pose::Coffee; // whatever she was doing, she stops for a sip
         }
         if t > self.blink_at + 0.13 {
-            self.blink_at = t + 3.0 + 3.0 * self.rand01();
+            self.blink_at = t + 3.0 + 3.0 * self.rand01() as f64;
         }
         let blinking = t > self.blink_at;
         // Long idle: she puts on music. Music she started herself stops when work starts.
@@ -1321,7 +1322,7 @@ impl eframe::App for App {
             self.swing = Vec2::ZERO;
         }
         if let (Some((last, last_vx, last_t)), Some(c), Some(inner)) = (self.hold, cursor, ctx.input(|i| i.viewport().inner_rect)) {
-            let dt = (t - last_t).clamp(0.001, 0.05);
+            let dt = ((t - last_t) as f32).clamp(0.001, 0.05);
             let vx = (c.x - last.x) / dt;
             self.swing = anim::swing_step(self.swing, (vx - last_vx) / HEIGHT, dt);
             self.hold = Some((c, vx, t));
@@ -1371,8 +1372,11 @@ impl eframe::App for App {
         if pose != self.shown {
             (self.prev_shown, self.shown, self.shown_at) = (self.shown, pose, t);
         }
-        let since = t - self.shown_at;
-        let fade = (since / POSE_FADE).min(1.0);
+        let since = (t - self.shown_at) as f32;
+        let fade = (since / POSE_FADE as f32).min(1.0);
+        // From here on, drawing: an f32 animation clock wrapped every hour (each pose's motion repeats evenly within it); timers use `now`.
+        let now = t;
+        let t = (now % 3600.0) as f32;
         let tex = |p: Pose| {
             let s = &self.sprites[p as usize];
             if blinking { s.blink.as_ref().unwrap_or(&s.open) } else { &s.open }
@@ -1381,7 +1385,7 @@ impl eframe::App for App {
             // The old pose fades out under the new one; squaring keeps her from looking see-through midway.
             draw_sprite(painter, tex(self.prev_shown), feet, HEIGHT, t, self.prev_shown, 9.0, self.swing, 9.0, 1.0 - fade * fade);
         }
-        draw_sprite(painter, tex(pose), feet, HEIGHT, t, pose, poke_t.unwrap_or(9.0), self.swing, since, fade);
+        draw_sprite(painter, tex(pose), feet, HEIGHT, t, pose, poke_t.map_or(9.0, |p| p as f32), self.swing, since, fade);
         if pose == Pose::Coffee {
             // Steam curls up from the mug's rim (coffee.png has none painted), following her head tilt.
             let rim = feet + anim::warp(0.535, 0.286, t, pose, 9.0, aspect, Vec2::ZERO) * HEIGHT;
@@ -1396,9 +1400,9 @@ impl eframe::App for App {
                 }
             }
         }
-        if t < self.coffee_until {
+        if now < self.coffee_until {
             // Hearts float up around her, each on its own loop, and fade out as the coffee runs out.
-            let fade = ((self.coffee_until - t) / 0.8).min(1.0);
+            let fade = ((self.coffee_until - now) / 0.8).min(1.0) as f32;
             for (i, fx) in [0.10, 0.88, 0.22, 0.78, 0.5].into_iter().enumerate() {
                 let p = (t / 2.2 + i as f32 * 0.37).fract();
                 let x = body.left() + body.width() * fx + (p * 6.0 + i as f32).sin() * 6.0;
@@ -1407,11 +1411,11 @@ impl eframe::App for App {
             }
             ctx.request_repaint();
         }
-        if t < self.dizzy_until || pose == Pose::Dizzy {
+        if now < self.dizzy_until || pose == Pose::Dizzy {
             // Stars circle her head, following her swing; the near side of the loop is bigger.
             let top = if matches!(pose, Pose::Held | Pose::Dizzy) { (0.40, 0.07) } else { (0.5, 0.06) };
             let head = feet + anim::warp(top.0, top.1, t, pose, 9.0, aspect, self.swing) * HEIGHT;
-            let fade = if pose == Pose::Dizzy { 1.0 } else { ((self.dizzy_until - t) / 0.5).min(1.0) }; // the tour shows her dizzy
+            let fade = if pose == Pose::Dizzy { 1.0 } else { ((self.dizzy_until - now) / 0.5).min(1.0) as f32 }; // the tour shows her dizzy
             for i in 0..3 {
                 let a = t * 4.0 + i as f32 * std::f32::consts::TAU / 3.0;
                 sparkle(painter, head + vec2(a.cos() * 42.0, a.sin() * 9.0), 6.0 + 2.5 * a.sin(), fade);
@@ -1456,7 +1460,7 @@ impl eframe::App for App {
                 sweat_drop(painter, at(fx, fy) + vec2(0.0, p * 14.0), 4.5, (1.0 - p).min(0.3) / 0.3);
             }
         }
-        let since = t - self.sparkle_at;
+        let since = (now - self.sparkle_at) as f32;
         if since < 3.0 {
             // Stars pop in one by one and twinkle, then fade out together.
             let fade = (3.0 - since).min(0.6) / 0.6;
@@ -1531,7 +1535,7 @@ impl eframe::App for App {
                             (self.view_list, self.list_scroll) = (st.playlist, 0);
                             music::rescan(); // pick up songs added since
                         }
-                        Icon::Stop => self.set_music(false, t),
+                        Icon::Stop => self.set_music(false, now),
                         Icon::Back => {} // only used in the song list header
                     }
                     if icon != Icon::Stop {
@@ -1624,7 +1628,7 @@ impl eframe::App for App {
             self.game_picker(ui, painter, anchor);
             list_shown = true;
         } else if game_shown && self.sudoku.is_some() {
-            self.sudoku_panel(ui, painter, anchor, t);
+            self.sudoku_panel(ui, painter, anchor, now);
             list_shown = true;
         } else if game_shown {
             // Her line, the hint, the word, the A-Z grid, then hearts and buttons.
@@ -1727,7 +1731,7 @@ impl eframe::App for App {
         }
         if toggle && let Some(b) = &mut self.bubble {
             b.expanded = !b.expanded;
-            b.hide_at = t + 10.0 + b.long.as_deref().unwrap_or("").chars().count() as f32 / 12.0;
+            b.hide_at = now + 10.0 + b.long.as_deref().unwrap_or("").chars().count() as f64 / 12.0;
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
@@ -1735,7 +1739,7 @@ impl eframe::App for App {
 
 /// How far the popup's entrance has got (0 to 1), eased out so it settles softly.
 fn popup_in(since: f32) -> f32 {
-    1.0 - (1.0 - (since / POPUP_IN).clamp(0.0, 1.0)).powi(3)
+    1.0 - (1.0 - (since / POPUP_IN as f32).clamp(0.0, 1.0)).powi(3)
 }
 
 /// A four-point star: two long strokes, two short diagonals and a bright center.
