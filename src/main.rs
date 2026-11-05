@@ -355,7 +355,7 @@ struct App {
     hosted: Option<Hosted>,
     hosted_n: u64,
     timeline: panel::Timeline, // the hosted session's turns, kept after it ends until the next one starts
-    reply_turn: Option<(f64, usize)>, // the reply being rewritten (as Msg::Rewritten's `at`) and its turn
+    reply_turns: Vec<(f64, usize)>, // replies being rewritten (as Msg::Rewritten's `at`) and their turns: a slow one may land after the next turn
     panel: Option<panel::PanelState>,
     graph: memgraph::GraphState,
     past: Vec<log::Past>,
@@ -517,7 +517,7 @@ impl App {
             hosted: None,
             hosted_n: 0,
             timeline: panel::Timeline::default(),
-            reply_turn: None,
+            reply_turns: vec![],
             panel: None,
             graph: memgraph::GraphState::default(),
             past: vec![],
@@ -1095,7 +1095,7 @@ impl App {
         self.hosted_n += 1;
         let n = self.hosted_n;
         self.hosted = Some(Hosted { n, session: None, queue: vec![], dir: dir.clone(), slash: vec![], always: HashSet::new() });
-        self.timeline = panel::Timeline::default();
+        (self.timeline, self.reply_turns) = (panel::Timeline::default(), vec![]);
         (self.pose, self.pending_reply, self.bubble) = (Pose::Idle, None, None);
         self.minis.clear();
         self.shells.clear(); // the terminal's: she isn't following it now
@@ -1243,13 +1243,14 @@ impl App {
                     voice::say(self.waiting_line, voice::Mode::Attention); // out loud, always: Claude needs you
                 }
                 (self.pose, self.waiting_since) = (Pose::Waiting, t);
-                let what = ["command", "file_path", "url", "query", "pattern"].iter().find_map(|k| input[*k].as_str()).map(|s| log::clean(s, 60)).unwrap_or_default();
+                let file = input["file_path"].as_str().map(|p| folder_name(Path::new(p)));
+                let what = file.or_else(|| ["command", "url", "query", "pattern"].iter().find_map(|k| input[*k].as_str()).map(|s| log::clean(s, 60))).unwrap_or_default();
                 let asks = i18n::ui().asks.replace("{tool}", &tool);
                 self.say(format!("{}\n{asks} {what}", self.waiting_line), None, t + 600.0);
             }
             S::Result { text, interrupted, .. } => {
                 if !interrupted && !text.trim().is_empty() {
-                    self.reply_turn = Some((t, self.timeline.turns.len().saturating_sub(1)));
+                    self.reply_turns.push((t, self.timeline.turns.len().saturating_sub(1)));
                     self.apply(Event::Reply(text), t);
                 }
                 self.apply(Event::TurnEnd, t);
@@ -1325,9 +1326,8 @@ impl App {
                 return;
             }
             Msg::Rewritten { short, long, at } => {
-                if let Some((when, turn)) = self.reply_turn
-                    && when == at
-                {
+                if let Some(i) = self.reply_turns.iter().position(|r| r.0 == at) {
+                    let (_, turn) = self.reply_turns.remove(i);
                     self.timeline.set_summary(turn, &short); // the panel's card gets her short version too
                 }
                 // Only the rewrite of the reply still waiting: not one that timed out, or an older reply's slow one.
