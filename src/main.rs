@@ -7,6 +7,7 @@ mod cli;
 mod game;
 mod sudoku;
 mod i18n;
+mod lan;
 mod log;
 mod memgraph;
 mod music;
@@ -71,6 +72,7 @@ const VOICE_KEY: &str = "voice"; // her voice on or off
 const MUSIC_MODE_KEY: &str = "music_mode"; // Loop / Loop 1 / Shuffle
 const PLAYLIST_KEY: &str = "playlist"; // name of the playlist to play
 const LANG_KEY: &str = "lang"; // EN or VI
+const LAN_KEY: &str = "lan"; // "on|id|code|friend,friend": LAN friends switched on, her id, her pairing code, paired ids
 const MIC_KEY: &str = "stt_listening"; // the microphone on or off
 const TALK_HOLD: f64 = 0.3; // seconds holding the mouse still on her before it's push-to-talk rather than a drag
 const SPEECH_TAIL: f64 = 0.3; // the mic stays off this long after her voice stops (room echo)
@@ -94,6 +96,7 @@ enum Msg {
     Hook(serde_json::Value), // from `claudesona hook`, or {"quit":true} from install/uninstall
     Heard(stt::Heard),       // you talked to her (wake word or push-to-talk)
     Files(u64, Vec<String>), // the hosted session's project files, relative names
+    Lan(lan::Event),         // a friend on the network poked her, sent a message, or paired
 }
 
 struct Sprite {
@@ -129,6 +132,9 @@ struct Popup {
     voice_key: String,    // used once to make the voice, never saved
     confirm_reset: bool,  // "Back to her default voice" was clicked once
     sessions: bool,       // the recent sessions list is open
+    friends: bool,        // the LAN friends section is open
+    lan_msg: String,      // a message for a friend
+    lan_code: String,     // a friend's pairing code being typed
 }
 
 /// A Claude Code session she runs herself (SPEC-v2.md, Hosted sessions). While there is one, she shows it
@@ -294,6 +300,7 @@ fn draw_box(painter: &Painter, text: &str, font: FontId, color: Color32, max_w: 
 }
 
 struct App {
+    lan_id: String, // who she is to her LAN friends (kept between runs)
     ctx: egui::Context,
     sprites: Vec<Sprite>, // indexed by Pose as usize
     pose: Pose,
@@ -457,11 +464,26 @@ impl App {
         music::set_mode(music_mode);
         let voice_on = saved(VOICE_KEY).is_none_or(|v| v == "true");
         voice::set_on(voice_on);
+        // LAN friends: off until switched on; a random id and 4-digit pairing code, made once and kept.
+        let lan_saved = saved(LAN_KEY).unwrap_or_default();
+        let mut lan_parts = lan_saved.splitn(4, '|');
+        let lan_on = lan_parts.next() == Some("on");
+        let rand = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+        let lan_id = lan_parts.next().filter(|s| !s.is_empty()).map(String::from).unwrap_or_else(|| format!("{rand:016x}"));
+        let lan_code = lan_parts.next().filter(|s| s.len() == 4).map(String::from).unwrap_or_else(|| format!("{:04}", (rand >> 20) % 10_000));
+        let lan_paired: Vec<String> = lan_parts.next().unwrap_or("").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+        let pc_name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Claudesona".into());
+        let (lan_tx, lan_wake) = (outbox.clone(), ctx.clone());
+        lan::start(lan_id.clone(), pc_name, lan_code, lan_paired, lan_on, move |ev| {
+            let _ = lan_tx.send(Msg::Lan(ev));
+            lan_wake.request_repaint();
+        });
         let lang = saved(LANG_KEY).and_then(|l| i18n::Lang::from_code(&l)).unwrap_or(i18n::Lang::En);
         i18n::set(lang);
         music::select(&playlist_name);
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
         Self {
+            lan_id,
             ctx,
             sprites,
             pose: Pose::Idle,
@@ -774,7 +796,7 @@ impl App {
         router::prewarm(); // you'll likely type: have Haiku ready to route it
         rewrite::prewarm(chat::persona()); // and to chat
         load_past(self.outbox.clone(), self.ctx.clone());
-        Some(Popup { her, work, left, size: vec2(POPUP_W, 360.0), input: String::new(), frames: 0, opened: t, had_focus: false, memories: false, confirm_forget: false, voice_setup: false, voice_id: String::new(), voice_key: String::new(), confirm_reset: false, sessions: false })
+        Some(Popup { her, work, left, size: vec2(POPUP_W, 360.0), input: String::new(), frames: 0, opened: t, had_focus: false, memories: false, confirm_forget: false, voice_setup: false, voice_id: String::new(), voice_key: String::new(), confirm_reset: false, sessions: false, friends: false, lan_msg: String::new(), lan_code: String::new() })
     }
 
     fn open_panel(&mut self) {
@@ -916,6 +938,56 @@ impl App {
                 close = true;
             }
 
+            // Friends on the local network (same protocol as Keqing): switch on, pair with a code, poke or message.
+            if ui.selectable_label(p.friends, text.friends).clicked() {
+                p.friends = !p.friends;
+            }
+            if p.friends {
+                let mut on = lan::is_on();
+                if ui.checkbox(&mut on, text.lan_on).changed() {
+                    lan::set_on(on);
+                }
+                if on {
+                    ui.label(RichText::new(text.lan_code.replace("{c}", &lan::code_and_paired().0)).strong());
+                    let peers = lan::peers();
+                    if peers.is_empty() {
+                        ui.label(RichText::new(text.lan_none).small().color(SOFT_INK));
+                    } else {
+                        ui.add(egui::TextEdit::singleline(&mut p.lan_msg).hint_text(text.lan_msg_hint).desired_width(f32::INFINITY));
+                    }
+                    for peer in &peers {
+                        let status = match peer.status.as_str() {
+                            "working" => text.lan_working,
+                            "waiting" => text.lan_waiting,
+                            "limit" => text.lan_limit,
+                            "music" => text.lan_music,
+                            _ => text.lan_idle,
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{} · {status}", peer.name));
+                            if peer.paired {
+                                if ui.button(text.poke_btn).clicked() {
+                                    lan::poke(&peer.id);
+                                }
+                                if !p.lan_msg.trim().is_empty() && ui.button(text.send_btn).clicked() {
+                                    lan::message(&peer.id, &p.lan_msg);
+                                    p.lan_msg.clear();
+                                }
+                                if ui.small_button("✕").on_hover_text(text.unpair).clicked() {
+                                    lan::unpair(&peer.id);
+                                }
+                            } else {
+                                ui.add(egui::TextEdit::singleline(&mut p.lan_code).hint_text("0000").desired_width(42.0));
+                                if ui.button(text.pair_btn).clicked() {
+                                    lan::pair(&peer.id, &p.lan_code);
+                                    p.lan_code.clear();
+                                }
+                            }
+                        });
+                    }
+                    ui.label(RichText::new(text.lan_note).small().color(SOFT_INK));
+                }
+            }
             ui.checkbox(&mut self.mic_on, text.microphone);
             ui.horizontal(|ui| {
                 if ui.checkbox(&mut self.voice_on, text.voice).changed() {
@@ -1353,6 +1425,18 @@ impl App {
                 }
                 return;
             }
+            Msg::Lan(ev) => {
+                let text = i18n::ui();
+                match ev {
+                    lan::Event::Poke(name) => {
+                        self.poke_at = Some(t);
+                        self.say(text.poked_by.replace("{n}", &name), None, t);
+                    }
+                    lan::Event::Message(name, msg) => self.say(format!("{name}: {msg}"), None, t + 15.0), // longer than a usual line
+                    lan::Event::Paired(name) => self.say(text.friend_paired.replace("{n}", &name), None, t),
+                }
+                return;
+            }
             Msg::Files(n, files) => {
                 if let Some(h) = self.hosted.as_mut().filter(|h| h.n == n) {
                     h.files = files;
@@ -1572,6 +1656,8 @@ impl eframe::App for App {
         storage.set_string(MUSIC_MODE_KEY, self.music_mode.label().to_string());
         storage.set_string(PLAYLIST_KEY, self.playlist_name.clone());
         storage.set_string(LANG_KEY, self.lang.code().to_string());
+        let (code, paired) = lan::code_and_paired();
+        storage.set_string(LAN_KEY, format!("{}|{}|{code}|{}", if lan::is_on() { "on" } else { "off" }, self.lan_id, paired.join(",")));
         storage.set_string(MIC_KEY, self.mic_on.to_string());
     }
 
@@ -1669,6 +1755,12 @@ impl eframe::App for App {
         if let Some(s) = &self.stt {
             s.set_listening(listening);
         }
+        lan::set_status(match self.pose {
+            Pose::Waiting => "waiting",
+            Pose::Working | Pose::Reading | Pose::Editing | Pose::Testing | Pose::Shipping | Pose::Web => "working",
+            _ if self.music.is_some() => "music",
+            _ => "idle",
+        });
         let mut pose = match self.pose {
             Pose::Idle if asleep => Pose::Sleep,
             Pose::Idle if self.music.is_some() => Pose::Music,
