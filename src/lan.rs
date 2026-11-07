@@ -46,6 +46,7 @@ pub struct Me {
 static ON: AtomicBool = AtomicBool::new(false);
 static ME: Mutex<Option<Me>> = Mutex::new(None);
 static PEERS: Mutex<Vec<Peer>> = Mutex::new(Vec::new());
+static EXTRA: Mutex<String> = Mutex::new(String::new()); // friends' IPs on other subnets, as typed: broadcasts don't cross routers
 static OUTBOX: OnceLock<Mutex<Sender<(Option<String>, String)>>> = OnceLock::new(); // (to peer id, or None = broadcast; packet)
 
 /// Starts the network thread (once). `emit` gets friends' pokes, messages and pairings.
@@ -67,6 +68,15 @@ pub fn set_on(on: bool) {
 
 pub fn is_on() -> bool {
     ON.load(Ordering::Relaxed)
+}
+
+/// Friends' IPs (comma or space separated) to say hello to directly, for friends behind another router.
+pub fn set_extra(ips: &str) {
+    *EXTRA.lock().unwrap() = ips.to_string();
+}
+
+pub fn extra() -> String {
+    EXTRA.lock().unwrap().clone()
 }
 
 /// Her state as friends see it.
@@ -167,6 +177,9 @@ fn run(rx: Receiver<(Option<String>, String)>, emit: impl Fn(Event)) {
             last_hello = Instant::now();
             if let Some(p) = hello() {
                 let _ = s.send_to(p.as_bytes(), ("255.255.255.255", PORT));
+                for ip in extra().split([',', ' ']).filter(|ip| !ip.is_empty()) {
+                    let _ = s.send_to(p.as_bytes(), (ip, PORT));
+                }
             }
         }
         while let Ok((to, packet)) = rx.try_recv() {
@@ -215,7 +228,7 @@ fn on_packet(me: &mut Me, peers: &mut Vec<Peer>, from: SocketAddr, text: &str, n
     match peers.iter_mut().find(|p| p.id == id) {
         Some(p) => {
             (p.name, p.addr, p.seen, p.paired) = (name.clone(), from, now, paired);
-            if t == "hello" {
+            if t == "hello" || t == "hi" {
                 p.status = v["status"].as_str().unwrap_or("").chars().take(40).collect();
             }
         }
@@ -224,6 +237,8 @@ fn on_packet(me: &mut Me, peers: &mut Vec<Peer>, from: SocketAddr, text: &str, n
     let mut events = vec![];
     let mut replies = vec![];
     match t {
+        // Answer every hello, so a friend who can only reach us by IP (another subnet) sees us too.
+        "hello" => replies.push(json!({"app": "claudesona", "t": "hi", "from": me.id, "name": me.name, "status": me.status}).to_string()),
         // Someone typed our code: trust them, and tell them so.
         "pair" if v["code"].as_str() == Some(me.code.as_str()) => {
             if !paired {
@@ -269,6 +284,19 @@ mod tests {
     }
     fn addr() -> SocketAddr {
         "192.168.1.20:47828".parse().unwrap()
+    }
+
+    #[test]
+    fn hello_gets_a_hi_that_isnt_answered() {
+        let mut a = Me { id: "a".into(), name: "A".into(), code: "1234".into(), status: "idle".into(), paired: vec![], pending: vec![] };
+        let mut peers = vec![];
+        let now = Instant::now();
+        let (r, _) = on_packet(&mut a, &mut peers, addr(), r#"{"app":"claudesona","t":"hello","from":"b","name":"B","status":"working"}"#, now);
+        assert_eq!(r.len(), 1);
+        assert!(r[0].contains(r#""t":"hi""#));
+        let (r, _) = on_packet(&mut a, &mut peers, addr(), r#"{"app":"claudesona","t":"hi","from":"b","name":"B","status":"waiting"}"#, now);
+        assert!(r.is_empty());
+        assert_eq!(peers[0].status, "waiting");
     }
 
     #[test]

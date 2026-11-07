@@ -72,7 +72,7 @@ const VOICE_KEY: &str = "voice"; // her voice on or off
 const MUSIC_MODE_KEY: &str = "music_mode"; // Loop / Loop 1 / Shuffle
 const PLAYLIST_KEY: &str = "playlist"; // name of the playlist to play
 const LANG_KEY: &str = "lang"; // EN or VI
-const LAN_KEY: &str = "lan"; // "on|id|code|friend,friend": LAN friends switched on, her id, her pairing code, paired ids
+const LAN_KEY: &str = "lan"; // "on|id|code|friend,friend|ips": LAN friends switched on, her id, her pairing code, paired ids, friends' IPs
 const MIC_KEY: &str = "stt_listening"; // the microphone on or off
 const TALK_HOLD: f64 = 0.3; // seconds holding the mouse still on her before it's push-to-talk rather than a drag
 const SPEECH_TAIL: f64 = 0.3; // the mic stays off this long after her voice stops (room echo)
@@ -466,12 +466,13 @@ impl App {
         voice::set_on(voice_on);
         // LAN friends: off until switched on; a random id and 4-digit pairing code, made once and kept.
         let lan_saved = saved(LAN_KEY).unwrap_or_default();
-        let mut lan_parts = lan_saved.splitn(4, '|');
+        let mut lan_parts = lan_saved.splitn(5, '|');
         let lan_on = lan_parts.next() == Some("on");
         let rand = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
         let lan_id = lan_parts.next().filter(|s| !s.is_empty()).map(String::from).unwrap_or_else(|| format!("{rand:016x}"));
         let lan_code = lan_parts.next().filter(|s| s.len() == 4).map(String::from).unwrap_or_else(|| format!("{:04}", (rand >> 20) % 10_000));
         let lan_paired: Vec<String> = lan_parts.next().unwrap_or("").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+        lan::set_extra(lan_parts.next().unwrap_or(""));
         let pc_name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "Claudesona".into());
         let (lan_tx, lan_wake) = (outbox.clone(), ctx.clone());
         lan::start(lan_id.clone(), pc_name, lan_code, lan_paired, lan_on, move |ev| {
@@ -949,6 +950,10 @@ impl App {
                 }
                 if on {
                     ui.label(RichText::new(text.lan_code.replace("{c}", &lan::code_and_paired().0)).strong());
+                    let mut ips = lan::extra();
+                    if ui.add(egui::TextEdit::singleline(&mut ips).hint_text(text.lan_ips).desired_width(f32::INFINITY)).changed() {
+                        lan::set_extra(&ips);
+                    }
                     let peers = lan::peers();
                     if peers.is_empty() {
                         ui.label(RichText::new(text.lan_none).small().color(SOFT_INK));
@@ -1657,7 +1662,7 @@ impl eframe::App for App {
         storage.set_string(PLAYLIST_KEY, self.playlist_name.clone());
         storage.set_string(LANG_KEY, self.lang.code().to_string());
         let (code, paired) = lan::code_and_paired();
-        storage.set_string(LAN_KEY, format!("{}|{}|{code}|{}", if lan::is_on() { "on" } else { "off" }, self.lan_id, paired.join(",")));
+        storage.set_string(LAN_KEY, format!("{}|{}|{code}|{}|{}", if lan::is_on() { "on" } else { "off" }, self.lan_id, paired.join(","), lan::extra()));
         storage.set_string(MIC_KEY, self.mic_on.to_string());
     }
 
