@@ -615,6 +615,12 @@ impl App {
         }
     }
 
+    fn give_coffee(&mut self, t: f64) {
+        self.coffee_until = t + COFFEE_FOR;
+        let line = self.pick(i18n::lines().coffee);
+        self.say(line.into(), None, t - 6.0);
+    }
+
     /// Asks Haiku for a word on a worker thread; the panel shows "thinking" until it arrives.
     fn start_game(&mut self) {
         (self.game, self.game_loading, self.tour, self.sudoku, self.picking) = (None, true, None, None, false);
@@ -898,9 +904,7 @@ impl App {
                 close = true;
             }
             if ui.button(text.give_coffee).clicked() {
-                self.coffee_until = t + COFFEE_FOR;
-                let line = self.pick(i18n::lines().coffee);
-                self.say(line.into(), None, t - 6.0);
+                self.give_coffee(t);
                 close = true;
             }
             if ui.button(text.what_can_i_do).clicked() {
@@ -1053,7 +1057,7 @@ impl App {
     }
 
     fn act(&mut self, action: router::Action, t: f64) {
-        use router::{Action, SessionCmd};
+        use router::{Action, Game, SessionCmd, Skill};
         match action {
             Action::Chat(text) => self.send_chat(text, t),
             Action::Say(line) => self.say(line, None, t),
@@ -1063,6 +1067,18 @@ impl App {
             Action::Summarize => self.summarize(t),
             Action::Remember(fact) => self.send_chat(format!("Remember: {fact}"), t), // her chat's keeper stores it
             Action::Forget(what) => self.send_chat(format!("Forget: {what}"), t),
+            Action::Skill(skill) => match skill {
+                Skill::MusicOn => self.set_music(true, t),
+                Skill::MusicOff => self.set_music(false, t),
+                Skill::NextSong if self.music.is_some() => music::next(),
+                Skill::NextSong => self.set_music(true, t),
+                Skill::Coffee => self.give_coffee(t),
+                Skill::Play(None) => (self.picking, self.tour) = (true, None),
+                Skill::Play(Some(Game::Hangman)) => self.start_game(),
+                Skill::Play(Some(Game::Sudoku)) => self.start_sudoku(),
+                Skill::Tour => self.tour = Some((t, usize::MAX)),
+                Skill::Hide => self.hidden_until = t + 600.0,
+            },
             Action::Session(SessionCmd::New { project }) => match matching_dirs(&self.past, project.as_deref()).as_slice() {
                 [dir] => self.start_session(dir.clone(), None, t),
                 _ => self.pick_folder(t),

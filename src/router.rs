@@ -34,6 +34,25 @@ pub enum Action {
     Session(SessionCmd),
     Remember(String),
     Forget(String),
+    Skill(Skill), // one of her own built-in things, like the menu buttons
+}
+
+/// Her built-in functions, the same ones her menu offers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Skill {
+    MusicOn,
+    MusicOff,
+    NextSong,
+    Coffee,
+    Play(Option<Game>), // None: she asks which game
+    Tour,
+    Hide,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Game {
+    Hangman,
+    Sudoku,
 }
 
 const SYSTEM: &str = r#"You route messages that a user says or types to Claudesona, a desktop mascot that drives a Claude Code session. Reply with one JSON object only, no prose, no code fences.
@@ -49,6 +68,7 @@ Actions:
 {"action":"session","cmd":"end"} - close the session.
 {"action":"remember","text":"..."} - asks her to remember a fact; text is the fact.
 {"action":"forget","text":"..."} - asks her to forget something; text says what.
+{"action":"skill","name":"..."} - asks her (not the coding assistant) to do one of her own things. name is one of: music_on (play music), music_off (stop the music), next_song, coffee (give her or have her drink coffee), play (play a game with her; add "game":"hangman" or "game":"sudoku" if named), tour (what can you do), hide (go away for a while).
 If a message starts with [prompt], it is always a prompt: return it cleaned up without the [prompt] mark."#;
 
 /// Starts the routing process early (e.g. when the mic hears speech), so `route` answers sooner.
@@ -175,6 +195,20 @@ fn parse(out: &str, original: &str, ctx: &RouteCtx, spoken: bool, forced: bool) 
         }),
         "remember" => Action::Remember(s("text")?),
         "forget" => Action::Forget(s("text")?),
+        "skill" => Action::Skill(match v["name"].as_str()? {
+            "music_on" => Skill::MusicOn,
+            "music_off" => Skill::MusicOff,
+            "next_song" => Skill::NextSong,
+            "coffee" => Skill::Coffee,
+            "play" => Skill::Play(match v["game"].as_str() {
+                Some("hangman") => Some(Game::Hangman),
+                Some("sudoku") => Some(Game::Sudoku),
+                _ => None,
+            }),
+            "tour" => Skill::Tour,
+            "hide" => Skill::Hide,
+            _ => return None,
+        }),
         _ => return None,
     })
 }
@@ -234,6 +268,10 @@ mod tests {
         assert_eq!(p(r#"{"action":"answer","allow":true}"#, true), None); // nothing is waiting
         assert_eq!(parse(r#"{"action":"answer","allow":false,"always":false}"#, "nah", &waiting(), true, false), Some(Action::Answer { allow: false, always: false }));
         assert_eq!(p(r#"{"action":"remember","text":""}"#, true), None);
+        assert_eq!(p(r#"{"action":"skill","name":"coffee"}"#, true), Some(Action::Skill(Skill::Coffee)));
+        assert_eq!(p(r#"{"action":"skill","name":"play","game":"sudoku"}"#, true), Some(Action::Skill(Skill::Play(Some(Game::Sudoku)))));
+        assert_eq!(p(r#"{"action":"skill","name":"play"}"#, true), Some(Action::Skill(Skill::Play(None))));
+        assert_eq!(p(r#"{"action":"skill","name":"fly"}"#, true), None);
         assert_eq!(p("not json at all", true), None);
         assert_eq!(p(r#"{"action":"fly"}"#, true), None);
         // "Claude, …" spoken: a prompt whatever Haiku called it
@@ -260,6 +298,9 @@ mod live {
             "can you compact the context",
             "start a session in my blog",
             "ờ sửa cái lỗi trong file rao tơ chấm rs giúp tớ",
+            "play some music",
+            "let's play sudoku",
+            "have a coffee, you earned it",
         ];
         for s in samples {
             let (tx, rx) = std::sync::mpsc::channel();
