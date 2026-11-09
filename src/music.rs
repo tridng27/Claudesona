@@ -272,7 +272,7 @@ const TRACKS: [Track; 10] = [
 pub enum Mode {
     Loop,    // the playlist in order, then from the top
     LoopOne, // the same song again
-    Shuffle, // a random song, never the same twice in a row
+    Shuffle, // a random song: all play once before any repeats, never the same twice in a row
 }
 
 impl Mode {
@@ -357,12 +357,23 @@ fn scan(dir: &Path) -> Vec<Playlist> {
 }
 
 /// Which song plays after `cur` (of `len`) in `mode`. `skip` is a Next press: Loop 1 moves on then too.
-fn after(mode: Mode, cur: usize, len: usize, skip: bool, rng: &mut Rng) -> usize {
+/// `seen` holds the songs Shuffle has played this round: every song plays once before any repeats.
+fn after(mode: Mode, cur: usize, len: usize, skip: bool, rng: &mut Rng, seen: &mut Vec<usize>) -> usize {
     match mode {
         Mode::LoopOne if !skip => cur,
         Mode::Shuffle if len > 1 => {
-            let i = (rng.next() * len as f32) as usize % len;
-            if i == cur { (i + 1) % len } else { i }
+            seen.retain(|&i| i < len); // the playlist may have shrunk
+            if !seen.contains(&cur) {
+                seen.push(cur);
+            }
+            if seen.len() >= len {
+                seen.clear(); // round over: start a new one
+            }
+            // `i != cur`: never the same song twice in a row, even across rounds.
+            let left: Vec<usize> = (0..len).filter(|i| !seen.contains(i) && *i != cur).collect();
+            let i = left[(rng.next() * left.len() as f32) as usize % left.len()];
+            seen.push(i);
+            i
         }
         _ => (cur + 1) % len.max(1),
     }
@@ -386,6 +397,7 @@ enum Cmd {
     Seek(f32),
     Stop,
     SetMode(Mode),
+    Volume(f32), // 0..=1
     Select(String), // make a playlist current by name, without playing
     Rescan,
     Voice(String), // one of her recorded lines (voice::say decided it should play)
@@ -430,6 +442,9 @@ pub fn stop() {
 }
 pub fn set_mode(mode: Mode) {
     send(Cmd::SetMode(mode));
+}
+pub fn set_volume(v: f32) {
+    send(Cmd::Volume(v.clamp(0.0, 1.0)));
 }
 /// Restores the saved playlist at startup (the built-in one if that folder is gone).
 pub fn select(playlist: &str) {
@@ -488,6 +503,7 @@ struct Deck {
     synth: Option<(usize, Vec<f32>)>, // rendered built-in track, kept so Loop 1 and seeking don't re-render
     len: f32,                         // seconds; 0 when a file doesn't say
     paused: bool,
+    volume: f32,
 }
 
 impl Deck {
@@ -535,6 +551,7 @@ impl Deck {
                 player.append(muffle(decoder));
             }
         }
+        player.set_volume(self.volume);
         if at > 0.0 {
             let _ = player.try_seek(Duration::from_secs_f32(at));
         }
@@ -586,9 +603,10 @@ fn player(rx: Receiver<Cmd>) {
     let mut seed = 1u32;
     let mut lists = scan(&music_dir());
     publish(&lists);
-    let mut deck = Deck { out: None, player: None, synth: None, len: 0.0, paused: false };
+    let mut deck = Deck { out: None, player: None, synth: None, len: 0.0, paused: false, volume: 1.0 };
     let (mut list, mut cur, mut mode) = (0usize, None::<usize>, Mode::Shuffle);
     let mut history: Vec<usize> = vec![]; // for Prev in shuffle
+    let mut seen: Vec<usize> = vec![]; // played this shuffle round
     let mut voice = None::<rodio::Player>;
     loop {
         let cmd = match rx.recv_timeout(Duration::from_millis(100)) {
@@ -603,6 +621,7 @@ fn player(rx: Receiver<Cmd>) {
                 if l != list {
                     (list, cur) = (l, None);
                     history.clear();
+                    seen.clear();
                     deck.synth = None;
                 }
                 start = Some((s, 0.0));
@@ -612,7 +631,7 @@ fn player(rx: Receiver<Cmd>) {
                 refresh(&mut lists, &mut list, &mut cur);
                 start = Some((first(mode, lists[list].songs.len(), &mut rng), 0.0));
             }
-            (Some(Cmd::Next), Some(c)) => start = Some((after(mode, c, len, true, &mut rng), 0.0)),
+            (Some(Cmd::Next), Some(c)) => start = Some((after(mode, c, len, true, &mut rng, &mut seen), 0.0)),
             (Some(Cmd::Prev), Some(c)) => {
                 // Like most players: past 3s, restart the song; otherwise go back one.
                 if deck.pos() > 3.0 {
@@ -631,8 +650,15 @@ fn player(rx: Receiver<Cmd>) {
                 deck.silence();
                 (deck.synth, deck.paused, cur) = (None, false, None);
                 history.clear();
+                seen.clear();
             }
             (Some(Cmd::SetMode(m)), _) => mode = m,
+        (Some(Cmd::Volume(v)), _) => {
+            deck.volume = v;
+            if let Some(p) = &deck.player {
+                p.set_volume(v);
+            }
+        }
             (Some(Cmd::Select(name)), None) => list = lists.iter().position(|l| l.name == name).unwrap_or(0),
             (Some(Cmd::Voice(text)), _) => voice = deck.say(crate::voice::load(&text)).or(voice),
             (Some(Cmd::VoiceMp3(mp3)), _) => voice = deck.say(Some(mp3)).or(voice),
@@ -642,9 +668,9 @@ fn player(rx: Receiver<Cmd>) {
                 if was_playing && cur.is_none() {
                     deck.silence(); // its file or folder is gone
                 }
-                history.clear();
+                history.clear(); // `seen` stays: opening the song list rescans, and that mustn't restart the shuffle round
             }
-            (None, Some(c)) if deck.ended() => start = Some((after(mode, c, len, false, &mut rng), 0.0)),
+            (None, Some(c)) if deck.ended() => start = Some((after(mode, c, len, false, &mut rng, &mut seen), 0.0)),
             _ => {}
         }
         if voice.as_ref().is_some_and(|v| v.empty()) {
@@ -661,10 +687,11 @@ fn player(rx: Receiver<Cmd>) {
                 tries += 1;
                 let len = lists[list].songs.len();
                 if tries < len {
-                    s = after(if mode == Mode::LoopOne { Mode::Loop } else { mode }, s, len, true, &mut rng);
+                    s = after(if mode == Mode::LoopOne { Mode::Loop } else { mode }, s, len, true, &mut rng, &mut seen);
                 } else if list != 0 {
                     (list, tries, cur) = (0, 0, None);
                     history.clear();
+                    seen.clear();
                     s = first(mode, lists[0].songs.len(), &mut rng);
                 } else {
                     playing = false; // even built-in songs fail: there's no sound device
@@ -1200,13 +1227,30 @@ mod tests {
     #[test]
     fn modes_pick_the_next_song() {
         let mut rng = Rng(7);
-        assert_eq!(after(Mode::Loop, 2, 3, false, &mut rng), 0);
-        assert_eq!(after(Mode::LoopOne, 1, 3, false, &mut rng), 1);
-        assert_eq!(after(Mode::LoopOne, 1, 3, true, &mut rng), 2); // Next still moves on
+        assert_eq!(after(Mode::Loop, 2, 3, false, &mut rng, &mut vec![]), 0);
+        assert_eq!(after(Mode::LoopOne, 1, 3, false, &mut rng, &mut vec![]), 1);
+        assert_eq!(after(Mode::LoopOne, 1, 3, true, &mut rng, &mut vec![]), 2); // Next still moves on
         for _ in 0..20 {
-            assert_ne!(after(Mode::Shuffle, 1, 3, false, &mut rng), 1);
+            assert_ne!(after(Mode::Shuffle, 1, 3, false, &mut rng, &mut vec![]), 1);
         }
-        assert_eq!(after(Mode::Shuffle, 0, 1, false, &mut rng), 0); // a one-song playlist just repeats
+        assert_eq!(after(Mode::Shuffle, 0, 1, false, &mut rng, &mut vec![]), 0); // a one-song playlist just repeats
+        // Shuffle plays every song once per round, never repeating back to back across rounds.
+        let (mut seen, mut cur) = (vec![], 3);
+        let mut round = vec![cur];
+        for _ in 0..9 {
+            cur = after(Mode::Shuffle, cur, 10, false, &mut rng, &mut seen);
+            assert!(!round.contains(&cur));
+            round.push(cur);
+        }
+        for _ in 0..5 {
+            let mut round = vec![];
+            for _ in 0..10 {
+                let next = after(Mode::Shuffle, cur, 10, false, &mut rng, &mut seen);
+                assert!(next != cur && !round.contains(&next));
+                round.push(next);
+                cur = next;
+            }
+        }
         assert_eq!(Mode::from_label(Mode::LoopOne.label()), Some(Mode::LoopOne));
     }
 }
@@ -1243,7 +1287,7 @@ fn deck_plays_a_file_with_pause_and_seek() {
     let path = dir.join("tone song.wav"); // a space, like real file names
     let tone: Vec<f32> = (0..RATE * 6).map(|i| 0.1 * (TAU * 440.0 * i as f32 / RATE as f32).sin()).collect();
     std::fs::write(&path, wav(&tone)).unwrap();
-    let mut deck = Deck { out: None, player: None, synth: None, len: 0.0, paused: false };
+    let mut deck = Deck { out: None, player: None, synth: None, len: 0.0, paused: false, volume: 1.0 };
     deck.start(&Song::File(path.clone()), 0.0, 1).expect("plays the WAV");
     assert!((deck.len - 6.0).abs() < 0.1, "len {}", deck.len);
     std::thread::sleep(Duration::from_millis(1200));

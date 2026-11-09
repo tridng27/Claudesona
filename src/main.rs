@@ -69,6 +69,7 @@ const TOUR_STEP: f64 = 6.5; // seconds per step
 const WORK_MUSIC_KEY: &str = "work_music"; // eframe storage key for the "While working" choice
 const VOICE_KEY: &str = "voice"; // her voice on or off
 const MUSIC_MODE_KEY: &str = "music_mode"; // Loop / Loop 1 / Shuffle
+const VOLUME_KEY: &str = "music_volume"; // 0..=1
 const PLAYLIST_KEY: &str = "playlist"; // name of the playlist to play
 const LANG_KEY: &str = "lang"; // EN or VI
 const MIC_KEY: &str = "stt_listening"; // the microphone on or off
@@ -336,6 +337,7 @@ struct App {
     view_list: usize,          // playlist shown in the song list
     list_scroll: usize,        // first song row shown
     music_mode: music::Mode,   // remembered
+    volume: f32,               // remembered, 0..=1
     lang: i18n::Lang,          // remembered
     playlist_name: String,     // remembered: the playlist to play
     game: Option<game::Game>,
@@ -455,6 +457,8 @@ impl App {
         let music_mode = saved(MUSIC_MODE_KEY).and_then(|m| music::Mode::from_label(&m)).unwrap_or(music::Mode::Shuffle);
         let playlist_name = saved(PLAYLIST_KEY).unwrap_or_else(|| music::BUILT_IN.to_string());
         music::set_mode(music_mode);
+        let volume = saved(VOLUME_KEY).and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0).clamp(0.0, 1.0);
+        music::set_volume(volume);
         let voice_on = saved(VOICE_KEY).is_none_or(|v| v == "true");
         voice::set_on(voice_on);
         let lang = saved(LANG_KEY).and_then(|l| i18n::Lang::from_code(&l)).unwrap_or(i18n::Lang::En);
@@ -504,6 +508,7 @@ impl App {
             view_list: 0,
             list_scroll: 0,
             music_mode,
+            volume,
             playlist_name,
             lang,
             game: None,
@@ -1586,6 +1591,7 @@ impl eframe::App for App {
         storage.set_string(WORK_MUSIC_KEY, self.work_music.to_string());
         storage.set_string(VOICE_KEY, self.voice_on.to_string());
         storage.set_string(MUSIC_MODE_KEY, self.music_mode.label().to_string());
+        storage.set_string(VOLUME_KEY, self.volume.to_string());
         storage.set_string(PLAYLIST_KEY, self.playlist_name.clone());
         storage.set_string(LANG_KEY, self.lang.code().to_string());
         storage.set_string(MIC_KEY, self.mic_on.to_string());
@@ -2058,9 +2064,32 @@ impl eframe::App for App {
                 self.music_mode = self.music_mode.next(); // our copy: the player's status lags a moment behind quick clicks
                 music::set_mode(self.music_mode);
             }
+            // Volume on the right: a wedge that fills up. Click or drag to set, or scroll the wheel over it.
+            let vol = Rect::from_min_max(pos2(card.right() - 54.0, card.top() + 38.0), pos2(card.right() - 10.0, card.top() + 50.0));
+            let vol_resp = ui.interact(vol.expand(4.0), ui.scope_id().with("volume"), Sense::click_and_drag());
+            let mut v = self.volume;
+            if let Some(p) = vol_resp.interact_pointer_pos().filter(|_| vol_resp.is_pointer_button_down_on()) {
+                v = (p.x - vol.left()) / vol.width();
+            }
+            if vol_resp.hovered() {
+                let wheel: f32 = ui.input(|i| i.events.iter().filter_map(|e| if let egui::Event::MouseWheel { delta, .. } = e { Some(delta.y) } else { None }).sum());
+                if wheel != 0.0 {
+                    v += wheel.signum() * 0.05;
+                }
+            }
+            let v = v.clamp(0.0, 1.0);
+            if v != self.volume {
+                self.volume = v;
+                music::set_volume(v);
+            }
+            let wedge = |to: f32| vec![vol.left_bottom(), pos2(vol.left() + vol.width() * to, vol.bottom()), pos2(vol.left() + vol.width() * to, vol.bottom() - vol.height() * to)];
+            painter.add(egui::Shape::convex_polygon(wedge(1.0), CORAL.gamma_multiply(if vol_resp.hovered() { 0.35 } else { 0.2 }), Stroke::NONE));
+            if v > 0.0 {
+                painter.add(egui::Shape::convex_polygon(wedge(v), CORAL, Stroke::NONE));
+            }
             let icons = [Icon::Prev, if st.paused { Icon::Play } else { Icon::Pause }, Icon::Next, Icon::List, Icon::Stop];
             for (i, icon) in icons.into_iter().enumerate() {
-                let c = pos2(card.center().x + 22.0 + (i as f32 - 2.0) * 36.0, card.top() + 44.0);
+                let c = pos2(card.center().x + 2.0 + (i as f32 - 2.0) * 32.0, card.top() + 44.0);
                 let r = ui.interact(Rect::from_center_size(c, vec2(30.0, 20.0)), ui.scope_id().with(("player", i)), Sense::click());
                 if r.hovered() || (icon == Icon::List && self.playlist_open) {
                     painter.rect_filled(r.rect, 6.0, CORAL.gamma_multiply(0.18));
